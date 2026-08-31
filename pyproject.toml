@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gb-dicom2bids"
+version = "0.1.0"
+description = "Auditable multicenter DICOM-to-BIDS curation for structural MRI"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "zhenzong", email = "linzhenzong1@163.com" },
+]
+dependencies = [
+  "matplotlib>=3.8,<4",
+  "nibabel>=5.2,<6",
+  "numpy>=1.26,<3",
+  "pydicom>=2.4,<4",
+  "PyYAML>=6.0,<7",
+  "SimpleITK>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "pytest>=8,<9",
+  "pytest-cov>=5,<7",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+gb-dicom2bids = "gb_dicom2bids.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

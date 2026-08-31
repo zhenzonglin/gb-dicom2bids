@@ -1,0 +1,30 @@
+paths:
+  dicom_root: /path/to/read-only/dicom
+  existing_bids_root: /path/to/existing/bids
+  staging_bids_root: /path/to/versioned/staging/bids
+  audit_root: /path/to/private/audit
+
+dataset:
+  name: Multicenter structural MRI
+  bids_version: "1.11.1"
+  single_session: true
+
+selection:
+  axial_max_angle_deg: 20.0
+  orientation_consistency_deg: 3.0
+  manual_review_margin: 5.0
+  allow_axial_mpr_fallback: true
+  minimum_brain_coverage_mm: 100.0
+  flair_prefer_3d: true
+
+conversion:
+  seed_from_existing_bids: true
+  convert_review_candidates: true
+  anonymize_sidecars: true
+  compression: y
+  workers: 2
+
+tools:
+  dcm2niix: dcm2niix
+  deno: deno
+  validator_spec: jsr:@bids/validator@3.0.1

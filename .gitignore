@@ -1,0 +1,56 @@
+# Python and build products
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+
+# Runtime configuration and generated state
+config/config.local.yaml
+.env
+data/
+work/
+logs/
+audit/
+outputs/
+sourcedata/
+derivatives/
+series_inventory.tsv
+protocol_catalog.tsv
+selection_manifest.tsv
+manual_review.tsv
+conversion_status.tsv
+old_vs_v4_diff.tsv
+series_sources.json
+
+# Medical imaging and DICOM-like files
+*.dcm
+*.DCM
+*.ima
+*.IMA
+*.nii
+*.nii.gz
+*.bval
+*.bvec
+*.par
+*.rec
+
+# Credentials and controlled mappings
+*.pem
+*.key
+*.p12
+*.pfx
+*crosswalk*
+*subject_map*
+*id_map*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

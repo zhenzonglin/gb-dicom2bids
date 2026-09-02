@@ -27,6 +27,25 @@ manual_review.tsv
 conversion_status.tsv
 old_vs_v4_diff.tsv
 series_sources.json
+pilot_manifest.tsv
+pilot_summary.json
+run_status.json
+resource_usage.tsv
+staging_seed.json
+run.launch
+status/
+qc_montages/
+pilot_qc_montages/
+qc_summary.tsv
+pilot_qc_summary.tsv
+qc_report.html
+pilot_qc_report.html
+bids_validator.json
+pilot_bids_validator.json
+pilot_baseline_bids_validator.json
+validation_status.json
+pilot_bids_validator_status.json
+pilot_baseline_bids_validator_status.json
 
 # Medical imaging and DICOM-like files
 *.dcm

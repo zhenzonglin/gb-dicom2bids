@@ -4,7 +4,8 @@ import hashlib
 import os
 import re
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ SPECIFIC_TAGS = [
 class InventoryResult:
     records: list[SeriesRecord]
     unreadable_relpaths: list[str]
+    files_seen: int = 0
 
 
 @dataclass
@@ -168,18 +170,22 @@ def _iter_files(root: Path) -> Iterable[Path]:
                 yield path
 
 
-def scan_dicom_tree(
+def _scan_dicom_tree_serial(
     dicom_root: Path,
     *,
     axial_max_angle_deg: float = 20.0,
     orientation_consistency_deg: float = 3.0,
+    scan_root: Path | None = None,
 ) -> InventoryResult:
     root = dicom_root.resolve()
+    target = scan_root.resolve() if scan_root is not None else root
     groups: dict[tuple[str, str, str, str], _SeriesAccumulator] = {}
     unreadable: list[str] = []
     subject_centers: dict[str, set[str]] = defaultdict(set)
+    files_seen = 0
 
-    for path in _iter_files(root):
+    for path in _iter_files(target):
+        files_seen += 1
         relative = path.relative_to(root)
         if len(relative.parts) < 2:
             unreadable.append(relative.as_posix())
@@ -215,38 +221,24 @@ def scan_dicom_tree(
                 first={
                     "series_number": _safe_int(getattr(dataset, "SeriesNumber", None)),
                     "modality": _safe_string(getattr(dataset, "Modality", "")),
-                    "series_description": _safe_string(
-                        getattr(dataset, "SeriesDescription", "")
-                    ),
+                    "series_description": _safe_string(getattr(dataset, "SeriesDescription", "")),
                     "protocol_name": _safe_string(getattr(dataset, "ProtocolName", "")),
                     "sequence_name": _safe_string(getattr(dataset, "SequenceName", "")),
                     "image_type": _string_list(getattr(dataset, "ImageType", None)),
                     "manufacturer": _safe_string(getattr(dataset, "Manufacturer", "")),
-                    "model_name": _safe_string(
-                        getattr(dataset, "ManufacturerModelName", "")
-                    ),
-                    "software_versions": _safe_string(
-                        getattr(dataset, "SoftwareVersions", "")
-                    ),
-                    "acquisition_type": _safe_string(
-                        getattr(dataset, "MRAcquisitionType", "")
-                    ),
-                    "repetition_time_ms": _safe_float(
-                        getattr(dataset, "RepetitionTime", None)
-                    ),
+                    "model_name": _safe_string(getattr(dataset, "ManufacturerModelName", "")),
+                    "software_versions": _safe_string(getattr(dataset, "SoftwareVersions", "")),
+                    "acquisition_type": _safe_string(getattr(dataset, "MRAcquisitionType", "")),
+                    "repetition_time_ms": _safe_float(getattr(dataset, "RepetitionTime", None)),
                     "echo_time_ms": _safe_float(getattr(dataset, "EchoTime", None)),
-                    "inversion_time_ms": _safe_float(
-                        getattr(dataset, "InversionTime", None)
-                    ),
+                    "inversion_time_ms": _safe_float(getattr(dataset, "InversionTime", None)),
                     "flip_angle_deg": _safe_float(getattr(dataset, "FlipAngle", None)),
                     "rows": _safe_int(getattr(dataset, "Rows", None)),
                     "columns": _safe_int(getattr(dataset, "Columns", None)),
                     "pixel_spacing_mm": _float_list(
                         getattr(dataset, "PixelSpacing", None), expected=2
                     ),
-                    "slice_thickness_mm": _safe_float(
-                        getattr(dataset, "SliceThickness", None)
-                    ),
+                    "slice_thickness_mm": _safe_float(getattr(dataset, "SliceThickness", None)),
                     "spacing_between_slices_mm": _safe_float(
                         getattr(dataset, "SpacingBetweenSlices", None)
                     ),
@@ -261,9 +253,7 @@ def scan_dicom_tree(
         accumulator.sop_uids.add(sop_key)
         accumulator.source_relpaths.append(relative.as_posix())
 
-        orientation = _float_list(
-            getattr(dataset, "ImageOrientationPatient", None), expected=6
-        )
+        orientation = _float_list(getattr(dataset, "ImageOrientationPatient", None), expected=6)
         position = _float_list(getattr(dataset, "ImagePositionPatient", None), expected=3)
         if orientation:
             accumulator.orientations.append(orientation)
@@ -326,4 +316,102 @@ def scan_dicom_tree(
             item.series_uid_hash,
         )
     )
-    return InventoryResult(records=records, unreadable_relpaths=sorted(unreadable))
+    return InventoryResult(
+        records=records,
+        unreadable_relpaths=sorted(unreadable),
+        files_seen=files_seen,
+    )
+
+
+def _scan_subject_job(
+    root: Path,
+    subject_root: Path,
+    axial_max_angle_deg: float,
+    orientation_consistency_deg: float,
+) -> InventoryResult:
+    return _scan_dicom_tree_serial(
+        root,
+        axial_max_angle_deg=axial_max_angle_deg,
+        orientation_consistency_deg=orientation_consistency_deg,
+        scan_root=subject_root,
+    )
+
+
+def scan_dicom_tree(
+    dicom_root: Path,
+    *,
+    axial_max_angle_deg: float = 20.0,
+    orientation_consistency_deg: float = 3.0,
+    workers: int = 1,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+) -> InventoryResult:
+    """Scan one center/subject tree with deterministic subject-level parallelism."""
+    root = dicom_root.resolve()
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    subject_roots: list[Path] = []
+    orphan_relpaths: list[str] = []
+    centers_by_label: dict[str, set[str]] = defaultdict(set)
+    if root.is_dir():
+        orphan_relpaths.extend(
+            path.relative_to(root).as_posix() for path in root.iterdir() if path.is_file()
+        )
+        for center_path in sorted(path for path in root.iterdir() if path.is_dir()):
+            orphan_relpaths.extend(
+                path.relative_to(root).as_posix()
+                for path in center_path.iterdir()
+                if path.is_file()
+            )
+            for subject_path in sorted(path for path in center_path.iterdir() if path.is_dir()):
+                label = sanitize_subject_label(subject_path.name)
+                centers_by_label[label].add(center_path.name)
+                subject_roots.append(subject_path)
+    collisions = {label: centers for label, centers in centers_by_label.items() if len(centers) > 1}
+    if collisions:
+        details = "; ".join(
+            f"sub-{label}: {sorted(centers)}" for label, centers in sorted(collisions.items())
+        )
+        raise ValueError(f"cross-center subject label collisions detected: {details}")
+    if workers == 1 or len(subject_roots) <= 1:
+        result = _scan_dicom_tree_serial(
+            root,
+            axial_max_angle_deg=axial_max_angle_deg,
+            orientation_consistency_deg=orientation_consistency_deg,
+        )
+        if progress_callback:
+            progress_callback(len(subject_roots), len(subject_roots), result.files_seen)
+        return result
+
+    records: list[SeriesRecord] = []
+    unreadable: list[str] = list(orphan_relpaths)
+    files_seen = 0
+    completed = 0
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                _scan_subject_job,
+                root,
+                subject_root,
+                axial_max_angle_deg,
+                orientation_consistency_deg,
+            )
+            for subject_root in subject_roots
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            records.extend(result.records)
+            unreadable.extend(result.unreadable_relpaths)
+            files_seen += result.files_seen
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, len(subject_roots), files_seen)
+    records.sort(
+        key=lambda item: (
+            item.center,
+            item.subject_id,
+            item.study_uid_hash,
+            item.series_number if item.series_number is not None else 10**9,
+            item.series_uid_hash,
+        )
+    )
+    return InventoryResult(records, sorted(unreadable), files_seen)

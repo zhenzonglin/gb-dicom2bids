@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -83,3 +84,26 @@ def test_cross_center_subject_collision_is_rejected(tmp_path) -> None:
 def test_subject_label_normalization() -> None:
     assert sanitize_subject_label("sub-TMS001") == "tms001"
     assert sanitize_subject_label("Patient_01") == "patient01"
+
+
+def test_parallel_inventory_is_deterministic_and_deduplicates(tmp_path) -> None:
+    root = tmp_path / "dicom"
+    for subject in ("P002", "P001"):
+        source = root / "siteA" / subject / "series" / "1.dcm"
+        _write_dicom(
+            source,
+            description="T1 AX",
+            z=0,
+            study_uid=generate_uid(),
+            series_uid=generate_uid(),
+        )
+        shutil.copy2(source, source.with_name("duplicate.dcm"))
+    serial = scan_dicom_tree(root, workers=1)
+    parallel = scan_dicom_tree(root, workers=2)
+    assert [row.private_dict() for row in parallel.records] == [
+        row.private_dict() for row in serial.records
+    ]
+    assert [row.subject_id for row in parallel.records] == ["p001", "p002"]
+    assert all(row.instance_count == 1 for row in parallel.records)
+    assert all(row.duplicate_instance_count == 1 for row in parallel.records)
+    assert parallel.files_seen == 4

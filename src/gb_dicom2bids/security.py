@@ -21,6 +21,8 @@ FORBIDDEN_EXTENSIONS = {".dcm", ".ima", ".nii", ".bval", ".bvec", ".p12", ".pfx"
 FORBIDDEN_PATH_FRAGMENTS = ("/data/" + "shares/", "/data/" + "usersdir/")
 SECRET_MARKERS = ("gh" + "p_", "github_" + "pat_", "BEGIN " + "PRIVATE KEY")
 MAX_FILE_BYTES = 5 * 1024 * 1024
+EXPECTED_NAME = "zhenzong"
+EXPECTED_EMAIL = "linzhenzong1@163.com"
 
 
 def check_public_release(root: Path) -> list[str]:
@@ -81,7 +83,13 @@ def _check_git_history(root: Path) -> list[str]:
     if not (root / ".git").exists():
         return []
     completed = subprocess.run(
-        ["git", "-C", str(root), "log", "--format=%an%x09%cn%x09%B%x00"],
+        [
+            "git",
+            "-C",
+            str(root),
+            "log",
+            "--format=%an%x09%ae%x09%cn%x09%ce%x09%B%x00",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -90,15 +98,25 @@ def _check_git_history(root: Path) -> list[str]:
         return []
     problems: list[str] = []
     for entry in completed.stdout.split("\0"):
+        entry = entry.lstrip("\r\n")
         if not entry.strip():
             continue
-        parts = entry.split("\t", 2)
-        if len(parts) != 3:
+        parts = entry.split("\t", 4)
+        if len(parts) != 5:
             problems.append("unable to parse git history identity")
             continue
-        author, committer, body = parts
-        if author != "zhenzong" or committer != "zhenzong":
-            problems.append(f"unexpected git identity: author={author!r}, committer={committer!r}")
+        author, author_email, committer, committer_email, body = parts
+        if (
+            author != EXPECTED_NAME
+            or author_email != EXPECTED_EMAIL
+            or committer != EXPECTED_NAME
+            or committer_email != EXPECTED_EMAIL
+        ):
+            problems.append(
+                "unexpected git identity: "
+                f"author={author!r} <{author_email}>, "
+                f"committer={committer!r} <{committer_email}>"
+            )
         if FORBIDDEN_TOKEN in body.lower():
             problems.append("forbidden token in git history")
         if "co-authored-by:" in body.lower():

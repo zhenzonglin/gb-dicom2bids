@@ -3,6 +3,7 @@ paths:
   existing_bids_root: /path/to/existing/bids
   staging_bids_root: /path/to/versioned/staging/bids
   audit_root: /path/to/private/audit
+  work_root: /path/to/local/scratch/gb-dicom2bids
 
 dataset:
   name: Multicenter structural MRI
@@ -21,10 +22,24 @@ conversion:
   seed_from_existing_bids: true
   convert_review_candidates: true
   anonymize_sidecars: true
-  compression: y
-  workers: 2
+  compression: pigz
+  compression_threads: 2
+  workers: 24
+  pilot_workers: 16
+  resume: true
+
+inventory:
+  workers: 24
+
+runtime:
+  status_interval_seconds: 5
+  resource_interval_seconds: 30
+  minimum_work_free_gb: 50
+  minimum_staging_free_gb: 500
+  minimum_available_memory_gb: 128
 
 tools:
   dcm2niix: dcm2niix
+  pigz: pigz
   deno: deno
   validator_spec: jsr:@bids/validator@3.0.1

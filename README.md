@@ -31,16 +31,43 @@ Edit `config/config.local.yaml` with workstation-local paths. The local file is 
 ## Required execution order
 
 ```bash
-gb-dicom2bids inventory --config config/config.local.yaml
-gb-dicom2bids convert --config config/config.local.yaml --dry-run
-gb-dicom2bids convert --config config/config.local.yaml
-gb-dicom2bids qc --config config/config.local.yaml
-gb-dicom2bids validate --config config/config.local.yaml
+gb-dicom2bids doctor --config config/config.local.yaml
+bash scripts/start_run.sh --config config/config.local.yaml --mode inventory-pilot
+gb-dicom2bids status --config config/config.local.yaml --watch 5 --processes
 ```
 
-Do not start with a full conversion. Review `protocol_catalog.tsv`, `selection_manifest.tsv`,
-and `manual_review.tsv` after inventory. See [workstation deployment](docs/workstation.md) and
-[manual review](docs/manual_review.md).
+The combined run performs the parallel inventory, selects a deterministic stratified pilot,
+converts it with the configured pilot worker count, runs pilot QC and BIDS validation, and stops.
+It never advances to the full cohort. Review `protocol_catalog.tsv`, `selection_manifest.tsv`,
+`manual_review.tsv`, `pilot_manifest.tsv`, and `pilot_summary.json` before continuing. See
+[workstation deployment](docs/workstation.md) and [manual review](docs/manual_review.md).
+
+After the pilot and manual review pass, the full conversion is explicitly started with:
+
+```bash
+gb-dicom2bids convert --config config/config.local.yaml --workers 24 --resume
+```
+
+Use `--subjects-file FILE` for a controlled subset and `--retry-failed` only after the cause of a
+recorded failure has been addressed. `scripts/stop_run.sh` sends `TERM` only to the recorded
+pipeline process group and never shuts down the workstation.
+
+## Parallel and resumable execution
+
+- Inventory parallelism is by participant directory; the parent process writes deterministic
+  series and protocol manifests.
+- Conversion parallelism is by participant. T1, FLAIR, and review candidates for one participant
+  always run sequentially in one worker.
+- `dcm2niix` writes an uncompressed NIfTI and `pigz` performs bounded compression using the
+  configured thread count.
+- Every series has an atomic state record with its phase, worker PID, child PID, output checksum,
+  log, and terminal result. Dead workers are recovered as interrupted work on resume.
+- Staging seeding is file-level resumable and records completed bytes, speed, and ETA. The source
+  BIDS tree is never modified.
+- Resource thresholds pause submission of new conversion work. System load is reported but is not
+  an automatic delay or priority gate.
+- Pilot validation records both the existing and staging datasets and fails acceptance only when
+  staging introduces a new validator error or the candidate validator result is unreadable.
 
 ## Selection policy
 
@@ -55,7 +82,7 @@ and `manual_review.tsv` after inventory. See [workstation deployment](docs/works
 
 ## Current validation boundary
 
-Version 0.1.0 is validated with synthetic metadata and images. Full-data conversion and downstream
+Version 0.2.0 is validated with synthetic metadata and images. Full-data conversion and downstream
 DWI-to-T1/T1-to-MNI smoke testing must be completed on the workstation before production promotion.
 
 ## Copyright

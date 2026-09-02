@@ -20,6 +20,14 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest --cov=src/gb_dicom2bids --cov-report=term-missing
+      - name: CLI smoke test
+        run: |
+          gb-dicom2bids --version
+          gb-dicom2bids --help
+          gb-dicom2bids convert --help
+          gb-dicom2bids status --help
+      - name: Shell syntax
+        run: bash -n scripts/start_run.sh scripts/stop_run.sh
       - name: Build
         run: python -m build
       - name: Public release gate

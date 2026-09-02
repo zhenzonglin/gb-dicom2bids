@@ -23,6 +23,9 @@ def test_load_valid_config(tmp_path) -> None:
     config = load_config(path)
     assert config.selection.axial_max_angle_deg == 20.0
     assert config.paths.audit_root == roots[3]
+    assert config.inventory.workers == 1
+    assert config.conversion.pilot_workers == 2
+    assert config.work_root == roots[3] / "work"
 
 
 def test_overlapping_paths_are_rejected(tmp_path) -> None:

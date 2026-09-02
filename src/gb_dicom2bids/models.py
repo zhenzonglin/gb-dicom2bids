@@ -96,6 +96,15 @@ class ConversionResult:
     mode: str
     output_path: str = ""
     message: str = ""
+    output_sha256: str = ""
+    sidecar_path: str = ""
+    sidecar_sha256: str = ""
+    worker_pid: int | None = None
+    child_pid: int | None = None
+    started_at: str = ""
+    finished_at: str = ""
+    elapsed_seconds: float | None = None
+    log_path: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {key: str(value) for key, value in asdict(self).items()}

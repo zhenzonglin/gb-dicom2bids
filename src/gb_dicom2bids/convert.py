@@ -4,10 +4,14 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
+from collections import defaultdict, deque
 from collections.abc import Iterable
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +31,19 @@ from .config import ProjectConfig, require_inputs
 from .manifest import write_conversion_results
 from .models import ConversionResult, SelectionRow, SeriesRecord
 from .orientation import classify_normal, classify_orientation
+from .runtime import (
+    ResourceSampler,
+    atomic_write_json,
+    process_is_alive,
+    read_json,
+    recover_stale_states,
+    resource_blockers,
+    resource_snapshot,
+    series_state_path,
+    update_run_state,
+    update_series_state,
+    utc_now,
+)
 
 
 class ConversionError(RuntimeError):
@@ -44,34 +61,111 @@ JPEG2000_TRANSFER_SYNTAXES = {
 def seed_staging(config: ProjectConfig, *, dry_run: bool = False) -> None:
     state_path = config.paths.audit_root / "staging_seed.json"
     staging = config.paths.staging_bids_root
+    source = config.paths.existing_bids_root
+    state = read_json(state_path)
     if state_path.exists():
-        state = json.loads(state_path.read_text(encoding="utf-8"))
         if Path(state.get("staging_bids_root", "")) != staging:
             raise ConversionError("staging seed state points to a different destination")
-        return
-    if staging.exists() and any(staging.iterdir()):
+        if Path(state.get("existing_bids_root", "")) != source:
+            raise ConversionError("staging seed state points to a different source")
+        if state.get("status") == "completed":
+            if not config.conversion.seed_from_existing_bids and staging.is_dir():
+                return
+            if staging.is_dir() and any(staging.iterdir()):
+                return
+    elif staging.exists() and any(staging.iterdir()):
         raise ConversionError(
             f"staging directory is non-empty without a seed record; refusing to merge: {staging}"
         )
     if dry_run:
         return
     config.paths.audit_root.mkdir(parents=True, exist_ok=True)
-    if config.conversion.seed_from_existing_bids:
-        shutil.copytree(
-            config.paths.existing_bids_root,
-            staging,
-            copy_function=shutil.copy2,
-            symlinks=True,
-            dirs_exist_ok=False,
+    staging.mkdir(parents=True, exist_ok=True)
+    if not config.conversion.seed_from_existing_bids:
+        atomic_write_json(
+            state_path,
+            {
+                "existing_bids_root": str(source),
+                "staging_bids_root": str(staging),
+                "status": "completed",
+                "files_total": 0,
+                "files_completed": 0,
+                "bytes_total": 0,
+                "bytes_completed": 0,
+                "updated_at": utc_now(),
+            },
         )
-    else:
-        staging.mkdir(parents=True, exist_ok=False)
+        return
+
+    files = sorted(path for path in source.rglob("*") if path.is_file() or path.is_symlink())
+    total_bytes = sum(path.stat().st_size for path in files if not path.is_symlink())
+    started = time.monotonic()
+    completed_bytes = 0
+    completed_files = 0
     state = {
-        "existing_bids_root": str(config.paths.existing_bids_root),
+        "existing_bids_root": str(source),
         "staging_bids_root": str(staging),
-        "seeded": True,
+        "status": "copying",
+        "files_total": len(files),
+        "files_completed": 0,
+        "bytes_total": total_bytes,
+        "bytes_completed": 0,
+        "speed_bytes_per_second": 0.0,
+        "eta_seconds": None,
+        "updated_at": utc_now(),
     }
-    state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(state_path, state)
+    for index, item in enumerate(files, start=1):
+        relative = item.relative_to(source)
+        destination = staging / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        size = 0 if item.is_symlink() else item.stat().st_size
+        if item.is_symlink():
+            target = os.readlink(item)
+            if not destination.is_symlink() or os.readlink(destination) != target:
+                destination.unlink(missing_ok=True)
+                os.symlink(target, destination)
+        elif not _same_file(item, destination):
+            _atomic_copy(item, destination)
+        completed_bytes += size
+        completed_files = index
+        if index == len(files) or index % 128 == 0:
+            elapsed = max(time.monotonic() - started, 1e-6)
+            speed = completed_bytes / elapsed
+            remaining = max(0, total_bytes - completed_bytes)
+            state.update(
+                {
+                    "files_completed": completed_files,
+                    "bytes_completed": completed_bytes,
+                    "speed_bytes_per_second": speed,
+                    "eta_seconds": remaining / speed if speed else None,
+                    "updated_at": utc_now(),
+                }
+            )
+            atomic_write_json(state_path, state)
+            update_run_state(
+                config,
+                "seeding_staging",
+                staging_files_completed=completed_files,
+                staging_files_total=len(files),
+                staging_bytes_completed=completed_bytes,
+                staging_bytes_total=total_bytes,
+                staging_speed_bytes_per_second=speed,
+                staging_eta_seconds=remaining / speed if speed else None,
+            )
+    state.update({"status": "completed", "updated_at": utc_now()})
+    atomic_write_json(state_path, state)
+
+
+def _same_file(source: Path, destination: Path) -> bool:
+    if not destination.is_file() or destination.is_symlink():
+        return False
+    source_stat = source.stat()
+    destination_stat = destination.stat()
+    return (
+        source_stat.st_size == destination_stat.st_size
+        and source_stat.st_mtime_ns == destination_stat.st_mtime_ns
+    )
 
 
 def convert_series_set(
@@ -81,9 +175,11 @@ def convert_series_set(
     *,
     subjects: set[str] | None = None,
     dry_run: bool = False,
+    workers: int | None = None,
+    resume: bool | None = None,
+    retry_failed: bool = False,
 ) -> list[ConversionResult]:
     require_inputs(config, need_existing_bids=config.conversion.seed_from_existing_bids)
-    seed_staging(config, dry_run=dry_run)
     by_hash = {record.series_uid_hash: record for record in records}
     selected_or_review = [
         row
@@ -108,32 +204,244 @@ def convert_series_set(
             for row in selected_or_review
         ]
 
+    _wait_for_initial_resources(config)
+    seed_staging(config)
     if shutil.which(config.tools.dcm2niix) is None and not Path(config.tools.dcm2niix).is_file():
         raise ConversionError(f"dcm2niix not found: {config.tools.dcm2niix}")
+    if config.conversion.compression == "pigz" and not (
+        shutil.which(config.tools.pigz) or Path(config.tools.pigz).is_file()
+    ):
+        raise ConversionError(f"pigz not found: {config.tools.pigz}")
 
     ensure_dataset_metadata(config)
     update_participants(config, records)
-    results: list[ConversionResult] = []
-    diff_rows: list[dict[str, str]] = []
+    resume_enabled = config.conversion.resume if resume is None else resume
+    if resume_enabled:
+        recover_stale_states(config.paths.audit_root)
+    grouped: dict[str, list[SelectionRow]] = defaultdict(list)
     for selection in selected_or_review:
-        record = by_hash.get(selection.series_uid_hash)
-        if record is None:
+        grouped[selection.subject_id].append(selection)
+    jobs: deque[tuple[list[SeriesRecord], list[SelectionRow]]] = deque()
+    results: list[ConversionResult] = []
+    for subject_id in sorted(grouped):
+        subject_selections = sorted(
+            grouped[subject_id],
+            key=lambda row: (row.candidate_type, row.series_uid_hash),
+        )
+        subject_records = [
+            by_hash[row.series_uid_hash]
+            for row in subject_selections
+            if row.series_uid_hash in by_hash
+        ]
+        missing = [row for row in subject_selections if row.series_uid_hash not in by_hash]
+        for row in missing:
+            update_series_state(
+                config.paths.audit_root,
+                row.series_uid_hash,
+                "failed",
+                subject_id=row.subject_id,
+                candidate_type=row.candidate_type,
+                worker_pid=os.getpid(),
+                child_pid=None,
+                finished_at=utc_now(),
+                message="series missing from private inventory",
+            )
             results.append(
                 ConversionResult(
-                    selection.subject_id,
-                    selection.series_uid_hash,
-                    selection.candidate_type,
+                    row.subject_id,
+                    row.series_uid_hash,
+                    row.candidate_type,
                     "failed",
                     "inventory",
                     message="series missing from private inventory",
                 )
             )
+        if subject_records:
+            jobs.append((subject_records, subject_selections))
+            for row in subject_selections:
+                state = read_json(series_state_path(config.paths.audit_root, row.series_uid_hash))
+                preserved_terminal = state.get("stage") in {
+                    "converted",
+                    "review_ready",
+                    "failed",
+                }
+                live_owner = state.get("stage") in {
+                    "linking",
+                    "dcm2niix",
+                    "compressing",
+                    "validating",
+                    "installing",
+                } and process_is_alive(state.get("worker_pid"))
+                if not (resume_enabled and (preserved_terminal or live_owner)):
+                    update_series_state(
+                        config.paths.audit_root,
+                        row.series_uid_hash,
+                        "queued",
+                        subject_id=row.subject_id,
+                        candidate_type=row.candidate_type,
+                        mode=("selected" if row.decision_status == "selected" else "review"),
+                        worker_pid=None,
+                        child_pid=None,
+                    )
+
+    worker_count = workers or config.conversion.workers
+    if worker_count < 1:
+        raise ConversionError("workers must be at least 1")
+    update_run_state(
+        config,
+        "converting",
+        total_subjects=len(jobs),
+        total_series=len(selected_or_review),
+        series_uid_hashes=sorted(row.series_uid_hash for row in selected_or_review),
+        workers=worker_count,
+        completed_subjects=0,
+        conversion_started_at=utc_now(),
+    )
+    diff_rows: list[dict[str, str]] = []
+    completed_subjects = 0
+    sampler = ResourceSampler(config)
+    sampler.start()
+    try:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            pending: dict[Any, list[SeriesRecord]] = {}
+            while jobs or pending:
+                while jobs and len(pending) < worker_count:
+                    try:
+                        snapshot = resource_snapshot(config)
+                        blockers = resource_blockers(config, snapshot)
+                    except OSError as exc:
+                        blockers = [f"resource probe failed: {exc}"]
+                    if blockers:
+                        update_run_state(
+                            config,
+                            "paused_resources",
+                            resource_blockers=blockers,
+                            completed_subjects=completed_subjects,
+                        )
+                        break
+                    subject_records, subject_selections = jobs.popleft()
+                    future = executor.submit(
+                        _convert_subject,
+                        config,
+                        subject_records,
+                        subject_selections,
+                        resume_enabled,
+                        retry_failed,
+                    )
+                    pending[future] = subject_records
+                if not pending:
+                    time.sleep(config.runtime.status_interval_seconds)
+                    continue
+                done, _ = wait(
+                    pending,
+                    timeout=config.runtime.status_interval_seconds,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    subject_records = pending.pop(future)
+                    try:
+                        subject_results, subject_diffs = future.result()
+                    except Exception as exc:
+                        subject_results = []
+                        for record in subject_records:
+                            update_series_state(
+                                config.paths.audit_root,
+                                record.series_uid_hash,
+                                "failed",
+                                subject_id=record.subject_id,
+                                candidate_type=record.candidate_type,
+                                worker_pid=None,
+                                child_pid=None,
+                                finished_at=utc_now(),
+                                message=f"subject worker failed: {exc}",
+                            )
+                            subject_results.append(
+                                ConversionResult(
+                                    record.subject_id,
+                                    record.series_uid_hash,
+                                    record.candidate_type,
+                                    "failed",
+                                    "worker",
+                                    message=str(exc),
+                                )
+                            )
+                        subject_diffs = []
+                    results.extend(subject_results)
+                    diff_rows.extend(subject_diffs)
+                    completed_subjects += 1
+                    write_conversion_results(
+                        config.paths.audit_root / "conversion_status.tsv", results
+                    )
+                    _write_diff(config.paths.audit_root / "old_vs_v4_diff.tsv", diff_rows)
+                    update_run_state(
+                        config,
+                        "converting",
+                        completed_subjects=completed_subjects,
+                        resource_blockers=[],
+                    )
+    finally:
+        sampler.stop()
+    results.sort(key=lambda row: (row.subject_id, row.candidate_type, row.series_uid_hash))
+    write_conversion_results(config.paths.audit_root / "conversion_status.tsv", results)
+    _write_diff(config.paths.audit_root / "old_vs_v4_diff.tsv", diff_rows)
+    failed = sum(result.status == "failed" for result in results)
+    update_run_state(
+        config,
+        "conversion_completed" if not failed else "conversion_completed_with_failures",
+        completed_subjects=completed_subjects,
+        failed_series=failed,
+    )
+    return results
+
+
+def _wait_for_initial_resources(config: ProjectConfig) -> None:
+    while True:
+        try:
+            blockers = resource_blockers(config, resource_snapshot(config))
+        except OSError as exc:
+            blockers = [f"resource probe failed: {exc}"]
+        if not blockers:
+            return
+        update_run_state(config, "paused_resources", resource_blockers=blockers)
+        time.sleep(config.runtime.status_interval_seconds)
+
+
+def _convert_subject(
+    config: ProjectConfig,
+    records: list[SeriesRecord],
+    selections: list[SelectionRow],
+    resume: bool,
+    retry_failed: bool,
+) -> tuple[list[ConversionResult], list[dict[str, str]]]:
+    by_hash = {record.series_uid_hash: record for record in records}
+    results: list[ConversionResult] = []
+    diffs: list[dict[str, str]] = []
+    for selection in selections:
+        record = by_hash.get(selection.series_uid_hash)
+        if record is None:
+            continue
+        previous = read_json(series_state_path(config.paths.audit_root, record.series_uid_hash))
+        resumed = _resume_result(previous, record, selection, resume, retry_failed)
+        if resumed is not None:
+            results.append(resumed)
             continue
         try:
-            result, diffs = _convert_one(config, record, selection)
+            result, new_diffs = _convert_one(config, record, selection)
             results.append(result)
-            diff_rows.extend(diffs)
+            diffs.extend(new_diffs)
         except Exception as exc:
+            finished = utc_now()
+            state = update_series_state(
+                config.paths.audit_root,
+                record.series_uid_hash,
+                "failed",
+                subject_id=record.subject_id,
+                candidate_type=record.candidate_type,
+                worker_pid=os.getpid(),
+                child_pid=None,
+                finished_at=finished,
+                message=str(exc),
+            )
             results.append(
                 ConversionResult(
                     record.subject_id,
@@ -142,18 +450,88 @@ def convert_series_set(
                     "failed",
                     "conversion",
                     message=str(exc),
+                    worker_pid=os.getpid(),
+                    started_at=str(state.get("started_at", "")),
+                    finished_at=finished,
+                    log_path=str(state.get("log_path", "")),
                 )
             )
+    return results, diffs
 
-    write_conversion_results(config.paths.audit_root / "conversion_status.tsv", results)
-    _write_diff(config.paths.audit_root / "old_vs_v4_diff.tsv", diff_rows)
-    return results
+
+def _resume_result(
+    previous: dict[str, Any],
+    record: SeriesRecord,
+    selection: SelectionRow,
+    resume: bool,
+    retry_failed: bool,
+) -> ConversionResult | None:
+    if not resume or not previous:
+        return None
+    stage = str(previous.get("stage", ""))
+    output = Path(str(previous.get("output_path", "")))
+    checksum = str(previous.get("output_sha256", ""))
+    sidecar = Path(str(previous.get("sidecar_path", "")))
+    sidecar_checksum = str(previous.get("sidecar_sha256", ""))
+    if (
+        stage in {"converted", "review_ready"}
+        and output.is_file()
+        and checksum
+        and _sha256(output) == checksum
+        and sidecar.is_file()
+        and sidecar_checksum
+        and _sha256(sidecar) == sidecar_checksum
+    ):
+        return ConversionResult(
+            record.subject_id,
+            record.series_uid_hash,
+            record.candidate_type,
+            "skipped",
+            "resume",
+            output_path=str(output),
+            message=f"verified prior {stage} output",
+            output_sha256=checksum,
+            sidecar_path=str(sidecar),
+            sidecar_sha256=sidecar_checksum,
+            worker_pid=os.getpid(),
+            started_at=str(previous.get("started_at", "")),
+            finished_at=str(previous.get("finished_at", "")),
+            log_path=str(previous.get("log_path", "")),
+        )
+    if stage == "failed" and not retry_failed:
+        return ConversionResult(
+            record.subject_id,
+            record.series_uid_hash,
+            record.candidate_type,
+            "failed",
+            "preserved_failure",
+            message=str(previous.get("message", "prior failure; use --retry-failed")),
+            worker_pid=os.getpid(),
+            started_at=str(previous.get("started_at", "")),
+            finished_at=str(previous.get("finished_at", "")),
+            log_path=str(previous.get("log_path", "")),
+        )
+    active_stages = {"linking", "dcm2niix", "compressing", "validating", "installing"}
+    if stage in active_stages and process_is_alive(previous.get("worker_pid")):
+        return ConversionResult(
+            record.subject_id,
+            record.series_uid_hash,
+            record.candidate_type,
+            "skipped",
+            "active_worker",
+            message="another live worker owns this series",
+            worker_pid=int(previous["worker_pid"]),
+            child_pid=previous.get("child_pid"),
+        )
+    return None
 
 
 def _convert_one(
     config: ProjectConfig, record: SeriesRecord, selection: SelectionRow
 ) -> tuple[ConversionResult, list[dict[str, str]]]:
-    work_root = config.paths.audit_root / "work" / f"sub-{record.subject_id}"
+    started_at = utc_now()
+    started_clock = time.monotonic()
+    work_root = config.work_root / f"sub-{record.subject_id}"
     work_root.mkdir(parents=True, exist_ok=True)
     log_root = config.paths.audit_root / "logs"
     log_root.mkdir(parents=True, exist_ok=True)
@@ -168,16 +546,31 @@ def _convert_one(
         output_dir = temp_root / "output"
         input_dir.mkdir()
         output_dir.mkdir()
+        update_series_state(
+            config.paths.audit_root,
+            record.series_uid_hash,
+            "linking",
+            subject_id=record.subject_id,
+            candidate_type=record.candidate_type,
+            worker_pid=os.getpid(),
+            child_pid=None,
+            started_at=started_at,
+            mode=("selected" if selection.decision_status == "selected" else "review"),
+        )
         _link_series(source_paths, input_dir)
         direct = _run_dcm2niix(config, input_dir, output_dir, record, "direct", log_root)
         mode = "direct"
         if direct is None:
             fixed_dir = temp_root / "fixed"
             fixed_dir.mkdir()
-            repair_actions = _prepare_fallback_series(source_paths, fixed_dir)
-            repair_log = log_root / (
-                f"sub-{record.subject_id}_{record.series_uid_hash}_repair.log"
+            repair_actions = _prepare_fallback_series(
+                source_paths,
+                fixed_dir,
+                config=config,
+                record=record,
+                log_root=log_root,
             )
+            repair_log = log_root / (f"sub-{record.subject_id}_{record.series_uid_hash}_repair.log")
             repair_log.write_text("\n".join(repair_actions) + "\n", encoding="utf-8")
             _clear_directory(output_dir)
             direct = _run_dcm2niix(config, fixed_dir, output_dir, record, "fallback", log_root)
@@ -185,6 +578,13 @@ def _convert_one(
         if direct is None:
             raise ConversionError("direct and fallback dcm2niix conversion failed")
         nifti_path, json_path = direct
+        update_series_state(
+            config.paths.audit_root,
+            record.series_uid_hash,
+            "validating",
+            worker_pid=os.getpid(),
+            child_pid=None,
+        )
         _validate_converted_pair(nifti_path, json_path, record)
 
         if selection.decision_status == "review":
@@ -197,8 +597,33 @@ def _convert_one(
             candidate_dir.mkdir(parents=True, exist_ok=True)
             target_nii = candidate_dir / "candidate.nii.gz"
             target_json = candidate_dir / "candidate.json"
-            shutil.copy2(nifti_path, target_nii)
-            shutil.copy2(json_path, target_json)
+            update_series_state(
+                config.paths.audit_root,
+                record.series_uid_hash,
+                "installing",
+                worker_pid=os.getpid(),
+            )
+            _atomic_copy(nifti_path, target_nii)
+            _atomic_copy(json_path, target_json)
+            finished_at = utc_now()
+            checksum = _sha256(target_nii)
+            sidecar_checksum = _sha256(target_json)
+            log_path = log_root / (f"sub-{record.subject_id}_{record.series_uid_hash}_{mode}.log")
+            update_series_state(
+                config.paths.audit_root,
+                record.series_uid_hash,
+                "review_ready",
+                worker_pid=os.getpid(),
+                child_pid=None,
+                finished_at=finished_at,
+                elapsed_seconds=time.monotonic() - started_clock,
+                output_path=str(target_nii),
+                output_sha256=checksum,
+                sidecar_path=str(target_json),
+                sidecar_sha256=sidecar_checksum,
+                log_path=str(log_path),
+                message=selection.reason,
+            )
             return (
                 ConversionResult(
                     record.subject_id,
@@ -208,14 +633,48 @@ def _convert_one(
                     mode,
                     str(target_nii),
                     selection.reason,
+                    output_sha256=checksum,
+                    sidecar_path=str(target_json),
+                    sidecar_sha256=sidecar_checksum,
+                    worker_pid=os.getpid(),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    elapsed_seconds=time.monotonic() - started_clock,
+                    log_path=str(log_path),
                 ),
                 [],
             )
 
-        installed, diffs = _install_selected(
-            config, record, selection, nifti_path, json_path
+        update_series_state(
+            config.paths.audit_root,
+            record.series_uid_hash,
+            "installing",
+            worker_pid=os.getpid(),
+            child_pid=None,
         )
+        installed, diffs = _install_selected(config, record, selection, nifti_path, json_path)
         update_scans(config, record, selection, installed)
+        finished_at = utc_now()
+        checksum = _sha256(installed)
+        installed_json = installed.with_name(installed.name.removesuffix(".nii.gz") + ".json")
+        sidecar_checksum = _sha256(installed_json)
+        log_path = log_root / f"sub-{record.subject_id}_{record.series_uid_hash}_{mode}.log"
+        elapsed = time.monotonic() - started_clock
+        update_series_state(
+            config.paths.audit_root,
+            record.series_uid_hash,
+            "converted",
+            worker_pid=os.getpid(),
+            child_pid=None,
+            finished_at=finished_at,
+            elapsed_seconds=elapsed,
+            output_path=str(installed),
+            output_sha256=checksum,
+            sidecar_path=str(installed_json),
+            sidecar_sha256=sidecar_checksum,
+            log_path=str(log_path),
+            message=selection.reason,
+        )
         return (
             ConversionResult(
                 record.subject_id,
@@ -225,6 +684,14 @@ def _convert_one(
                 mode,
                 str(installed),
                 selection.reason,
+                output_sha256=checksum,
+                sidecar_path=str(installed_json),
+                sidecar_sha256=sidecar_checksum,
+                worker_pid=os.getpid(),
+                started_at=started_at,
+                finished_at=finished_at,
+                elapsed_seconds=elapsed,
+                log_path=str(log_path),
             ),
             diffs,
         )
@@ -247,6 +714,7 @@ def _run_dcm2niix(
     mode: str,
     log_root: Path,
 ) -> tuple[Path, Path] | None:
+    compression = "n" if config.conversion.compression == "pigz" else "y"
     command = [
         config.tools.dcm2niix,
         "-b",
@@ -254,27 +722,114 @@ def _run_dcm2niix(
         "-ba",
         "y" if config.conversion.anonymize_sidecars else "n",
         "-z",
-        config.conversion.compression,
+        compression,
+        "--progress",
+        "y",
         "-o",
         str(output_dir),
         "-f",
         "converted",
         str(input_dir),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
     log_path = log_root / f"sub-{record.subject_id}_{record.series_uid_hash}_{mode}.log"
-    log_path.write_text(
-        f"returncode={completed.returncode}\n{completed.stdout}\n{completed.stderr}",
-        encoding="utf-8",
+    returncode = _stream_command(
+        command,
+        log_path,
+        config,
+        record,
+        "dcm2niix",
     )
     nifti = sorted(output_dir.glob("*.nii.gz")) or sorted(output_dir.glob("*.nii"))
     sidecars = sorted(output_dir.glob("*.json"))
-    if completed.returncode != 0 or len(nifti) != 1 or len(sidecars) != 1:
+    if returncode != 0 or len(nifti) != 1 or len(sidecars) != 1:
         return None
-    return nifti[0], sidecars[0]
+    nifti_path = nifti[0]
+    if config.conversion.compression == "pigz":
+        if nifti_path.suffix != ".nii":
+            return None
+        pigz_log = log_root / (f"sub-{record.subject_id}_{record.series_uid_hash}_{mode}_pigz.log")
+        returncode = _stream_command(
+            [
+                config.tools.pigz,
+                "-p",
+                str(config.conversion.compression_threads),
+                "-f",
+                str(nifti_path),
+            ],
+            pigz_log,
+            config,
+            record,
+            "compressing",
+        )
+        nifti_path = Path(f"{nifti_path}.gz")
+        if returncode != 0 or not nifti_path.is_file():
+            return None
+    return nifti_path, sidecars[0]
 
 
-def _prepare_fallback_series(source_paths: list[Path], destination: Path) -> list[str]:
+def _stream_command(
+    command: list[str],
+    log_path: Path,
+    config: ProjectConfig,
+    record: SeriesRecord,
+    stage: str,
+) -> int:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        log.write(f"command={json.dumps(command)}\n")
+        log.flush()
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        update_series_state(
+            config.paths.audit_root,
+            record.series_uid_hash,
+            stage,
+            worker_pid=os.getpid(),
+            child_pid=process.pid,
+            log_path=str(log_path),
+            last_tool=Path(command[0]).name,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            log.write(line)
+            log.flush()
+            match = re.search(r"(?<!\d)(\d{1,3})%", line)
+            if match:
+                update_series_state(
+                    config.paths.audit_root,
+                    record.series_uid_hash,
+                    stage,
+                    worker_pid=os.getpid(),
+                    child_pid=process.pid,
+                    progress_percent=min(100, int(match.group(1))),
+                    last_output=line.strip()[-500:],
+                )
+        returncode = process.wait()
+        log.write(f"\nreturncode={returncode}\n")
+    update_series_state(
+        config.paths.audit_root,
+        record.series_uid_hash,
+        stage,
+        worker_pid=os.getpid(),
+        child_pid=None,
+        returncode=returncode,
+    )
+    return returncode
+
+
+def _prepare_fallback_series(
+    source_paths: list[Path],
+    destination: Path,
+    *,
+    config: ProjectConfig | None = None,
+    record: SeriesRecord | None = None,
+    log_root: Path | None = None,
+) -> list[str]:
     actions: list[str] = []
     for index, source in enumerate(source_paths, start=1):
         output = destination / f"instance-{index:06d}.dcm"
@@ -282,6 +837,15 @@ def _prepare_fallback_series(source_paths: list[Path], destination: Path) -> lis
         transfer_syntax = _transfer_syntax(dataset)
         if transfer_syntax and getattr(transfer_syntax, "is_compressed", False):
             if str(transfer_syntax) in JPEG2000_TRANSFER_SYNTAXES:
+                if config is not None and record is not None:
+                    update_series_state(
+                        config.paths.audit_root,
+                        record.series_uid_hash,
+                        "dcm2niix",
+                        worker_pid=os.getpid(),
+                        child_pid=None,
+                        last_tool="python-gdcm",
+                    )
                 try:
                     dataset.decompress(decoding_plugin="gdcm")
                 except TypeError:
@@ -290,9 +854,7 @@ def _prepare_fallback_series(source_paths: list[Path], destination: Path) -> lis
                     raise ConversionError(
                         f"GDCM decompression failed for {transfer_syntax}: {exc}"
                     ) from exc
-                actions.append(
-                    f"decompressed\t{index:06d}\t{transfer_syntax}\tpython-gdcm"
-                )
+                actions.append(f"decompressed\t{index:06d}\t{transfer_syntax}\tpython-gdcm")
                 transfer_syntax = _transfer_syntax(dataset)
             else:
                 decoder = decoder_command(str(transfer_syntax), source, output)
@@ -302,17 +864,27 @@ def _prepare_fallback_series(source_paths: list[Path], destination: Path) -> lis
                     )
                 if shutil.which(decoder[0]) is None:
                     raise ConversionError(f"required decoder is missing: {decoder[0]}")
-                completed = subprocess.run(
-                    decoder, capture_output=True, text=True, check=False
-                )
-                if completed.returncode != 0:
-                    raise ConversionError(
-                        f"decoder failed for {transfer_syntax}: {completed.stderr.strip()}"
+                if config is not None and record is not None and log_root is not None:
+                    decoder_log = log_root / (
+                        f"sub-{record.subject_id}_{record.series_uid_hash}_"
+                        f"{decoder[0]}_{index:06d}.log"
                     )
+                    returncode = _stream_command(
+                        decoder,
+                        decoder_log,
+                        config,
+                        record,
+                        "dcm2niix",
+                    )
+                    error = f"inspect {decoder_log}"
+                else:
+                    completed = subprocess.run(decoder, capture_output=True, text=True, check=False)
+                    returncode = completed.returncode
+                    error = completed.stderr.strip()
+                if returncode != 0:
+                    raise ConversionError(f"decoder failed for {transfer_syntax}: {error}")
                 dataset = pydicom.dcmread(output, force=True)
-                actions.append(
-                    f"decompressed\t{index:06d}\t{transfer_syntax}\t{decoder[0]}"
-                )
+                actions.append(f"decompressed\t{index:06d}\t{transfer_syntax}\t{decoder[0]}")
         _sanitize_dataset(dataset)
         _ensure_file_meta(dataset)
         try:
@@ -325,9 +897,7 @@ def _prepare_fallback_series(source_paths: list[Path], destination: Path) -> lis
                 dataset.save_as(output, enforce_file_format=True)
             except TypeError:
                 dataset.save_as(output, write_like_original=False)
-            actions.append(
-                f"removed_private_tags\t{index:06d}\t{type(first_error).__name__}"
-            )
+            actions.append(f"removed_private_tags\t{index:06d}\t{type(first_error).__name__}")
         actions.append(f"rewritten\t{index:06d}")
     return actions
 

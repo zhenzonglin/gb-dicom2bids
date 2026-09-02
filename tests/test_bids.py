@@ -66,6 +66,12 @@ def test_scans_metadata(record_factory, tmp_path) -> None:
     nifti = config.paths.staging_bids_root / "sub-001" / "anat" / "sub-001_T1w.nii.gz"
     nifti.parent.mkdir(parents=True)
     nifti.touch()
-    update_scans(config, record, selection, nifti)
     scans = config.paths.staging_bids_root / "sub-001" / "sub-001_scans.tsv"
-    assert "protocol_id" in scans.read_text()
+    scans.write_text(
+        "filename\tprotocol_id\nanat/sub-001_acq-old_T1w.nii.gz\told\n",
+        encoding="utf-8",
+    )
+    update_scans(config, record, selection, nifti)
+    content = scans.read_text()
+    assert "protocol_id" in content
+    assert "acq-old" not in content

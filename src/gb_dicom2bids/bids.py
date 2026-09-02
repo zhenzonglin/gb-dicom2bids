@@ -101,6 +101,16 @@ def update_scans(
                 if row.get("filename"):
                     existing[row["filename"]] = dict(row)
     filename = installed_nifti.relative_to(subject_root).as_posix()
+    suffix = "T1w" if record.candidate_type == "t1" else "FLAIR"
+    stale = [
+        prior
+        for prior in existing
+        if prior.startswith("anat/")
+        and (prior.endswith(f"{suffix}.nii") or prior.endswith(f"{suffix}.nii.gz"))
+        and prior != filename
+    ]
+    for prior in stale:
+        del existing[prior]
     existing[filename] = {
         **existing.get(filename, {}),
         "filename": filename,
@@ -119,9 +129,7 @@ def update_scans(
         {
             "protocol_id": {"LongName": "Curated acquisition protocol identifier"},
             "source_plane": {"LongName": "DICOM geometry-derived acquisition plane"},
-            "source_kind": {
-                "LongName": "Original or scanner-derived source classification"
-            },
+            "source_kind": {"LongName": "Original or scanner-derived source classification"},
             "selection_qc": {"LongName": "Reason for curated sequence selection"},
         }
     )

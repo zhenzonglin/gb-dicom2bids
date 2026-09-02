@@ -18,12 +18,21 @@ from matplotlib import pyplot as plt  # noqa: E402
 
 
 def run_qc(
-    config: ProjectConfig, records: list[SeriesRecord], selections: list[SelectionRow]
+    config: ProjectConfig,
+    records: list[SeriesRecord],
+    selections: list[SelectionRow],
+    *,
+    subjects: set[str] | None = None,
+    output_prefix: str = "",
 ) -> list[dict[str, Any]]:
     audit = config.paths.audit_root
-    montage_root = audit / "qc_montages"
+    montage_root = audit / f"{output_prefix}qc_montages"
     montage_root.mkdir(parents=True, exist_ok=True)
-    selected = [row for row in selections if row.decision_status == "selected"]
+    selected = [
+        row
+        for row in selections
+        if row.decision_status == "selected" and (subjects is None or row.subject_id in subjects)
+    ]
     by_hash = {record.series_uid_hash: record for record in records}
     rows: list[dict[str, Any]] = []
     selected_by_subject: dict[str, list[SelectionRow]] = {}
@@ -96,7 +105,7 @@ def run_qc(
             )
 
     for row in selections:
-        if row.decision_status == "review":
+        if row.decision_status == "review" and (subjects is None or row.subject_id in subjects):
             rows.append(
                 {
                     "subject_id": row.subject_id,
@@ -109,8 +118,8 @@ def run_qc(
                     "registration_metric": "",
                 }
             )
-    _write_qc(audit / "qc_summary.tsv", rows)
-    _write_html(audit / "qc_report.html", rows)
+    _write_qc(audit / f"{output_prefix}qc_summary.tsv", rows)
+    _write_html(audit / f"{output_prefix}qc_report.html", rows)
     return rows
 
 
@@ -238,11 +247,15 @@ def _write_html(path: Path, rows: list[dict[str, Any]]) -> None:
         ]
         cells = "".join(f"<td>{html.escape(str(value))}</td>" for value in values)
         table_rows.append(f"<tr>{cells}<td>{montage_link}</td></tr>")
-    document = """<!doctype html>
+    document = (
+        """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>gb-dicom2bids QC</title>
 <style>body{font-family:sans-serif}table{border-collapse:collapse}
 td,th{border:1px solid #aaa;padding:.4rem}</style>
 </head><body><h1>QC summary</h1><table><thead><tr><th>subject</th><th>type</th>
 <th>status</th><th>detail</th><th>registration metric</th><th>image</th></tr></thead>
-<tbody>""" + "\n".join(table_rows) + "</tbody></table></body></html>\n"
+<tbody>"""
+        + "\n".join(table_rows)
+        + "</tbody></table></body></html>\n"
+    )
     path.write_text(document, encoding="utf-8")

@@ -104,7 +104,11 @@ def write_protocol_catalog(path: Path, records: list[SeriesRecord]) -> None:
 
 
 def write_selection(
-    audit_root: Path, rows: list[SelectionRow], records: list[SeriesRecord]
+    audit_root: Path,
+    rows: list[SelectionRow],
+    records: list[SeriesRecord],
+    *,
+    preserve_manual: bool = True,
 ) -> None:
     _write_tsv(
         audit_root / "selection_manifest.tsv", (row.to_dict() for row in rows), SELECTION_FIELDS
@@ -154,10 +158,10 @@ def write_selection(
         "reviewer",
         "comments",
     ]
-    existing_decisions = _existing_manual_values(manual_path)
+    existing_decisions = _existing_manual_values(manual_path) if preserve_manual else {}
     for item in manual_rows:
         key = (item["subject_id"], item["study_uid_hash"], item["series_uid_hash"])
-        if key in existing_decisions:
+        if key in existing_decisions and not str(item["reason"]).startswith("visual_qc_"):
             item.update(existing_decisions[key])
     _write_tsv(manual_path, manual_rows, fields)
 

@@ -26,6 +26,7 @@ jobs:
           gb-dicom2bids --help
           gb-dicom2bids convert --help
           gb-dicom2bids status --help
+          python qc_viewer.py --help
       - name: Shell syntax
         run: bash -n scripts/start_run.sh scripts/stop_run.sh
       - name: Build

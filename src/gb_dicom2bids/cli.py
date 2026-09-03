@@ -16,6 +16,8 @@ from .manifest import load_private_records, load_selection, write_inventory, wri
 from .models import SelectionRow, SeriesRecord
 from .pilot import select_pilot_subjects, write_pilot_manifest, write_pilot_summary
 from .qc import run_qc
+from .qc_state import enabled as visual_qc_enabled
+from .qc_state import overlay_records, writer_lock
 from .runtime import status_snapshot, update_run_state, utc_now
 from .select import apply_manual_decisions, build_selection
 from .validate import compare_validator_errors, run_bids_validator
@@ -96,6 +98,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _inventory(config: ProjectConfig) -> int:
+    if visual_qc_enabled(config):
+        raise ConfigError("visual QC has frozen this inventory; do not rescan into this audit root")
+    with writer_lock(config):
+        return _inventory_locked(config)
+
+
+def _inventory_locked(config: ProjectConfig) -> int:
     require_inputs(config)
     update_run_state(
         config,
@@ -143,10 +152,13 @@ def _load_curated_state(
     config: ProjectConfig,
 ) -> tuple[list[SeriesRecord], list[SelectionRow]]:
     records = load_private_records(config.paths.audit_root)
+    records = overlay_records(config, records)
     selection_path = config.paths.audit_root / "selection_manifest.tsv"
     rows = load_selection(selection_path)
-    rows = apply_manual_decisions(rows, config.paths.audit_root / "manual_review.tsv")
-    write_selection(config.paths.audit_root, rows, records)
+    if not visual_qc_enabled(config):
+        with writer_lock(config):
+            rows = apply_manual_decisions(rows, config.paths.audit_root / "manual_review.tsv")
+            write_selection(config.paths.audit_root, rows, records)
     return records, rows
 
 

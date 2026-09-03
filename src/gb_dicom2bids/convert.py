@@ -12,6 +12,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +29,11 @@ from pydicom.uid import (
 
 from .bids import ensure_dataset_metadata, update_participants, update_scans
 from .config import ProjectConfig, require_inputs
-from .manifest import write_conversion_results
+from .manifest import _write_tsv, write_conversion_results
 from .models import ConversionResult, SelectionRow, SeriesRecord
 from .orientation import classify_normal, classify_orientation
+from .qc_state import applied_choice, authorized_choice, writer_lock
+from .qc_state import enabled as visual_qc_enabled
 from .runtime import (
     ResourceSampler,
     atomic_write_json,
@@ -169,6 +172,16 @@ def _same_file(source: Path, destination: Path) -> bool:
 
 
 def convert_series_set(
+    config: ProjectConfig,
+    records: list[SeriesRecord],
+    selections: list[SelectionRow],
+    **kwargs: Any,
+) -> list[ConversionResult]:
+    with writer_lock(config):
+        return _convert_series_set_locked(config, records, selections, **kwargs)
+
+
+def _convert_series_set_locked(
     config: ProjectConfig,
     records: list[SeriesRecord],
     selections: list[SelectionRow],
@@ -420,13 +433,38 @@ def _convert_subject(
         record = by_hash.get(selection.series_uid_hash)
         if record is None:
             continue
+        if (
+            visual_qc_enabled(config)
+            and selection.decision_status == "selected"
+            and not applied_choice(config, record)
+        ):
+            selection = replace(selection, decision_status="review", reason="awaiting_visual_qc")
         previous = read_json(series_state_path(config.paths.audit_root, record.series_uid_hash))
-        resumed = _resume_result(previous, record, selection, resume, retry_failed)
+        expected = (
+            config.paths.staging_bids_root
+            / f"sub-{record.subject_id}"
+            / "anat"
+            / f"{selection.output_basename}.nii.gz"
+        )
+        resumed = _resume_result(
+            previous, record, selection, resume, retry_failed, expected_output=expected
+        )
         if resumed is not None:
             results.append(resumed)
             continue
         try:
-            result, new_diffs = _convert_one(config, record, selection)
+            candidate = _resume_result(
+                previous, record, replace(selection, decision_status="review"), resume, retry_failed
+            )
+            if (
+                previous.get("stage") == "review_ready"
+                and candidate is not None
+                and candidate.status == "skipped"
+                and selection.decision_status == "selected"
+            ):
+                result, new_diffs = _promote_review(config, record, selection, candidate)
+            else:
+                result, new_diffs = _convert_one(config, record, selection)
             results.append(result)
             diffs.extend(new_diffs)
         except Exception as exc:
@@ -465,6 +503,8 @@ def _resume_result(
     selection: SelectionRow,
     resume: bool,
     retry_failed: bool,
+    *,
+    expected_output: Path | None = None,
 ) -> ConversionResult | None:
     if not resume or not previous:
         return None
@@ -475,6 +515,16 @@ def _resume_result(
     sidecar_checksum = str(previous.get("sidecar_sha256", ""))
     if (
         stage in {"converted", "review_ready"}
+        and (previous.get("subject_id", record.subject_id) == record.subject_id)
+        and (previous.get("series_uid_hash", record.series_uid_hash) == record.series_uid_hash)
+        and (
+            (
+                stage == "converted"
+                and selection.decision_status == "selected"
+                and (expected_output is None or output.resolve() == expected_output.resolve())
+            )
+            or (stage == "review_ready" and selection.decision_status == "review")
+        )
         and output.is_file()
         and checksum
         and _sha256(output) == checksum
@@ -526,8 +576,44 @@ def _resume_result(
     return None
 
 
+def _promote_review(
+    config: ProjectConfig, record: SeriesRecord, selection: SelectionRow, prior: ConversionResult
+) -> tuple[ConversionResult, list[dict[str, str]]]:
+    image, sidecar = Path(prior.output_path), Path(prior.sidecar_path)
+    _validate_converted_pair(image, sidecar, record)
+    installed, diffs = _install_selected(config, record, selection, image, sidecar)
+    installed_json = installed.with_name(installed.name.removesuffix(".nii.gz") + ".json")
+    update_scans(config, record, selection, installed)
+    result = replace(
+        prior,
+        status="converted",
+        mode="promoted_review",
+        output_path=str(installed),
+        sidecar_path=str(installed_json),
+        finished_at=utc_now(),
+    )
+    update_series_state(
+        config.paths.audit_root,
+        record.series_uid_hash,
+        "converted",
+        subject_id=record.subject_id,
+        candidate_type=record.candidate_type,
+        output_path=str(installed),
+        sidecar_path=str(installed_json),
+        output_sha256=prior.output_sha256,
+        sidecar_sha256=prior.sidecar_sha256,
+        finished_at=result.finished_at,
+        child_pid=None,
+    )
+    return result, diffs
+
+
 def _convert_one(
-    config: ProjectConfig, record: SeriesRecord, selection: SelectionRow
+    config: ProjectConfig,
+    record: SeriesRecord,
+    selection: SelectionRow,
+    *,
+    preview_only: bool = False,
 ) -> tuple[ConversionResult, list[dict[str, str]]]:
     started_at = utc_now()
     started_clock = time.monotonic()
@@ -585,7 +671,14 @@ def _convert_one(
             worker_pid=os.getpid(),
             child_pid=None,
         )
-        _validate_converted_pair(nifti_path, json_path, record)
+        if preview_only:
+            from .qc_images import check_image
+
+            if selection.decision_status != "review":
+                raise ConversionError("preview-only conversion cannot install a selected image")
+            check_image(nifti_path)
+        else:
+            _validate_converted_pair(nifti_path, json_path, record)
 
         if selection.decision_status == "review":
             candidate_dir = (
@@ -1029,7 +1122,23 @@ def _install_selected(
     selection: SelectionRow,
     nifti_path: Path,
     json_path: Path,
+    *,
+    visual_apply: bool = False,
 ) -> tuple[Path, list[dict[str, str]]]:
+    if visual_qc_enabled(config) and not visual_apply:
+        raise ConversionError("visual QC is enabled; installation requires qc_viewer.py --apply")
+    if not authorized_choice(config, record, nifti_path):
+        raise ConversionError("visual QC approval is required for this exact candidate/image")
+    if visual_qc_enabled(config):
+        from .qc_state import candidate_id, digest, qc_root, read_decision
+
+        rating = (
+            read_decision(qc_root(config), record.subject_id)
+            .get("candidates", {})
+            .get(candidate_id(record), {})
+        )
+        if rating.get("sidecar_sha256") != digest(json_path):
+            raise ConversionError("sidecar differs from the visually approved candidate")
     anat_dir = config.paths.staging_bids_root / f"sub-{record.subject_id}" / "anat"
     anat_dir.mkdir(parents=True, exist_ok=True)
     suffix = "T1w" if record.candidate_type == "t1" else "FLAIR"
@@ -1125,8 +1234,4 @@ def _write_diff(path: Path, rows: Iterable[dict[str, str]]) -> None:
     for row in combined:
         key = tuple(row.get(field, "") for field in fields)
         keyed[key] = row
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
-        writer.writeheader()
-        writer.writerows(keyed.values())
+    _write_tsv(path, keyed.values(), fields)

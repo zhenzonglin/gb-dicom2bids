@@ -7,6 +7,17 @@ dataset without modifying source DICOM data.
 
 Author: **zhenzong**
 
+## Optional visual QC patch for v0.2.0
+
+Run `python qc_viewer.py` in the existing environment for a loopback-only, offline reviewer.
+Compare all T1/FLAIR candidates, including excluded series, save per-candidate quality and one
+final choice per modality, then explicitly apply with `python qc_viewer.py --apply --dry-run`
+and `python qc_viewer.py --apply`. No re-inventory or environment rebuild is required.
+Once enabled, ordinary conversion cannot install unreviewed images or bypass the explicit apply
+step. Copied legacy images remain uncertified until reviewed. See the
+[installation, review and rollback guide](docs/visual_qc.md). Synthetic tests are not real-cohort
+validation; continue to run BIDS validation and downstream smoke tests before promotion.
+
 ## Safety boundary
 
 - Source DICOM directories are read-only.

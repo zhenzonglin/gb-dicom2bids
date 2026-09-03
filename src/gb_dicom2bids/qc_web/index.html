@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="qc-token" content="__QC_TOKEN__"><title>GB · 影像质控</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><div class="brand"><b>GB</b><span>影像质控 <small>VISUAL REVIEW / 01</small></span></div><div id="subject-title">选择一位受试者</div><span class="local">● 本机 · 私有</span></header>
+<aside>
+<h2>待阅队列 <span id="total">—</span></h2>
+<input id="search" placeholder="受试者 / 序列名称">
+<div class="filter-pair"><input id="center" placeholder="中心"><input id="protocol" placeholder="协议编号"></div>
+<select id="auto-status"><option value="">全部自动状态</option><option value="selected">自动入选</option><option value="review">待复核</option><option value="excluded">排除</option></select>
+<input id="reason-filter" placeholder="复核原因，如 near_tie">
+<div class="checks"><label><input id="pilot" type="checkbox">仅pilot</label><label><input id="pending" type="checkbox">未定候选</label><label><input id="others" type="checkbox">包括其他序列</label></div>
+<div id="subjects"></div><nav><button id="prev-page">上一页</button><button id="next-page">下一页</button></nav>
+<p class="hint">自动入选是推荐，不等于人工通过。<br>重扫候选可逐一比较。</p>
+</aside>
+<main><div class="notice">阅片显示为物理空间三正交面；原始采集方向以元数据为准。左 L / 右 R 为神经学显示。</div>
+<div id="panes"><section class="empty">从左侧选择受试者，开始并排阅片。</section></div>
+<section id="decision-bar" hidden>
+<div class="groups"><div><b>T1最终选择</b><span id="choice-t1">未确定</span><button data-none="t1">无可用T1</button><button data-clear="t1">清除选择</button><input id="none-reason-t1" placeholder="无可用候选的原因"></div>
+<div><b>FLAIR最终选择</b><span id="choice-flair">未确定</span><button data-none="flair">无可用FLAIR</button><button data-clear="flair">清除选择</button><input id="none-reason-flair" placeholder="无可用候选的原因"></div></div>
+<div class="episode"><label><input id="episode" type="checkbox">所选不同Study/日期属于同一次检查重扫</label><input id="episode-reason" placeholder="确认依据；非同次检查请保持待核实"></div>
+<div class="save-row"><label>审核者 <input id="reviewer" value="zhenzong"></label><span id="revision"></span><button id="save">保存决定</button><button id="save-next" class="primary">保存并下一例 →</button></div>
+</section></main><footer><span id="message">等待载入</span><span>仅保存QC决定 · 不在浏览器中修改BIDS</span></footer>
+<script src="/app.js"></script></body></html>

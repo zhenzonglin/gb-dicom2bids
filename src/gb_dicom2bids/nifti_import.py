@@ -66,8 +66,8 @@ def _inspect(root: Path, path: Path) -> tuple[SeriesRecord | None, str | None]:
     record = SeriesRecord(
         center=center,
         subject_id=subject,
-        # No exam identity survives in a NIfTI-only tree. Separate series folders remain
-        # separate episodes so selecting across them requires explicit human confirmation.
+        # No exam identity survives in a NIfTI-only tree. Keep a stable private identity for
+        # each series folder without treating it as a QC requirement.
         study_uid_hash=_hash(relative.parent.as_posix()),
         series_uid_hash=_hash(relative.as_posix()),
         modality="MR",

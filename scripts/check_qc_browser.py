@@ -27,6 +27,7 @@ def check(url: str, output: Path, channel: str | None):
         page.goto(url, wait_until="networkidle")
         expect(page.locator(".pane")).to_have_count(2)
         expect(page.locator(".frame img[src]")).to_have_count(6)
+        expect(page.locator("#episode")).to_have_count(0)
         expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
         expect(
             page.locator(".pane-head select").first.locator("option:checked")

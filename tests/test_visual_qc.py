@@ -203,7 +203,7 @@ def test_reclassify_other_install_and_sagittal_block(review):
     assert changed.candidate_type == "flair" and changed.decision_status == "selected"
 
 
-def test_repeat_study_conflict_requires_explicit_confirmation(review):
+def test_distinct_study_does_not_block_final_choices(review):
     service, records, _ = review
     uid = candidate_id(records[2])
     # Simulate distinct study metadata while keeping the test's candidate lookup fixed.
@@ -215,21 +215,21 @@ def test_repeat_study_conflict_requires_explicit_confirmation(review):
     raw = choice(service, records[0])
     raw["candidates"][uid] = {"quality": "pass", "modality": "flair"}
     raw["groups"]["flair"] = {"choice": uid}
-    with pytest.raises(ValueError, match="same examination"):
-        service.save("001", raw)
-    raw.update(episode_confirmed=True, episode_reason="same examination, repeated for motion")
-    assert service.save("001", raw)["episode_confirmed"]
+    raw.update(episode_confirmed=False, episode_reason="")  # ignored legacy fields
+    saved = service.save("001", raw)
+    assert saved["groups"]["t1"]["choice"] == candidate_id(records[0])
+    assert saved["groups"]["flair"]["choice"] == uid
+    assert "episode_confirmed" not in saved and "episode_reason" not in saved
 
 
-def test_time_conflict_even_with_same_study(review):
+def test_time_conflict_does_not_block_final_choices(review):
     service, records, _ = review
     raw = choice(service, records[0])
     uid = candidate_id(records[2])
     service._times[uid] = {"StudyDate": "20000102"}
     raw["candidates"][uid] = {"quality": "pass", "modality": "flair"}
     raw["groups"]["flair"] = {"choice": uid}
-    with pytest.raises(ValueError, match="same examination"):
-        service.save("001", raw)
+    assert service.save("001", raw)["groups"]["flair"]["choice"] == uid
 
 
 def test_apply_new_subject_replace_quarantine_and_source_unchanged(review):
@@ -585,8 +585,10 @@ def test_http_token_origin_version_and_local_assets(review):
         script = request("/app.js").read()
         assert b"test-token" in html
         assert b'id="others" type="checkbox" checked' in html
+        assert b'id="episode"' not in html
         assert "按文件夹名独立选择序列".encode() in html
         assert b"comparisonCandidates" in script
+        assert b"episode_confirmed" not in script
         assert "展示序列".encode() in script
         assert "指定为 FLAIR".encode() in script
         with pytest.raises(HTTPError) as error:

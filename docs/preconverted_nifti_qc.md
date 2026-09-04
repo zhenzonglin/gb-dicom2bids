@@ -60,8 +60,8 @@ python qc_viewer.py --config config/config.nifti.local.yaml
 Both display panes have independent sequence selectors whose labels start with the source series
 folder name. Choose any sequence, explicitly designate it as T1, FLAIR, or other, record
 pass/fail/defer, and select at most one final candidate per modality. Manual reclassification
-requires a reason. Different series folders have no surviving examination identity;
-selecting across them requires an explicit confirmation that they belong to the same examination.
+requires a reason. Different series folders have no surviving examination identity, but Study or
+date differences are not used as a save-time QC gate.
 
 Saving records decisions only. Preview preparation reads and hashes the selected source on demand;
 it does not copy the whole source collection. Apply a small reviewed batch first:

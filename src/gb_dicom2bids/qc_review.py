@@ -444,8 +444,6 @@ class ReviewService:
             "reviewer": reviewer,
             "candidates": {},
             "groups": {},
-            "episode_confirmed": raw.get("episode_confirmed") is True,
-            "episode_reason": str(raw.get("episode_reason", "")).strip(),
         }
         ratings = raw.get("candidates", {})
         groups = raw.get("groups", {})
@@ -496,7 +494,6 @@ class ReviewService:
                     }
                 )
             clean["candidates"][uid] = item
-        selected = []
         for modality, group in groups.items():
             if modality not in {"t1", "flair"} or not isinstance(group, dict):
                 raise ValueError("invalid modality group")
@@ -538,21 +535,7 @@ class ReviewService:
                     Path(artifact["sidecar"]),
                     replace(record, candidate_type=modality),
                 )
-                selected.append(uid)
             clean["groups"][modality] = {"choice": uid, "none": none, "reason": reason}
-        studies = {self.records[uid].study_uid_hash for uid in selected}
-        dates = {
-            self.timing(uid).get("AcquisitionDate") or self.timing(uid).get("StudyDate")
-            for uid in selected
-        }
-        dates.discard(None)
-        dates.discard("")
-        if (len(studies) > 1 or len(dates) > 1) and (
-            not clean["episode_confirmed"] or not clean["episode_reason"]
-        ):
-            raise ValueError(
-                "confirm these repeated scans belong to the same examination and give a reason"
-            )
         return clean
 
     def save(self, subject: str, raw: dict[str, Any]) -> dict[str, Any]:

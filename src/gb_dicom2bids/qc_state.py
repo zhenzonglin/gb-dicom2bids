@@ -163,8 +163,6 @@ def read_decision(root: Path, subject: str) -> dict[str, Any]:
         "reviewer": "zhenzong",
         "candidates": {},
         "groups": {},
-        "episode_confirmed": False,
-        "episode_reason": "",
     }
 
 

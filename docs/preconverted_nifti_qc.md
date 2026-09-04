@@ -63,6 +63,12 @@ pass/fail/defer, and select at most one final candidate per modality. Manual rec
 requires a reason. Different series folders have no surviving examination identity, but Study or
 date differences are not used as a save-time QC gate.
 
+Each candidate is shown as its stored NIfTI `data[:, :, k]` planes along the third voxel axis.
+The viewer only transposes and vertically flips the pixel matrix for screen layout; it does not
+interpolate, crop, or construct axial/coronal/sagittal physical-space reslices. The slider and
+mouse wheel move by one integer source-slice index. This display mode must not be interpreted as
+evidence of the original acquisition orientation.
+
 Saving records decisions only. Preview preparation reads and hashes the selected source on demand;
 it does not copy the whole source collection. Apply a small reviewed batch first:
 

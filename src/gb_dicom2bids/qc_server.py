@@ -95,8 +95,7 @@ def handler_class(service: ReviewService, token: str):
                         raise ValueError("candidate is not ready")
                     content = service.volumes.slice_png(
                         Path(artifact["image"]),
-                        query.get("plane", "axial"),
-                        float(query["position"]),
+                        int(query["index"]),
                         float(query["low"]),
                         float(query["high"]),
                     )

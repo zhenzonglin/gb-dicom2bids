@@ -26,7 +26,9 @@ def check(url: str, output: Path, channel: str | None):
         )
         page.goto(url, wait_until="networkidle")
         expect(page.locator(".pane")).to_have_count(2)
-        expect(page.locator(".frame img[src]")).to_have_count(6)
+        expect(page.locator(".frame img[src]")).to_have_count(2)
+        expect(page.locator(".frame img").first).to_have_attribute("alt", "原始体素切片")
+        expect(page.locator(".view-caption").first).to_contain_text("原始体素切片（第三维）")
         expect(page.locator("#episode")).to_have_count(0)
         expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
         expect(
@@ -55,6 +57,9 @@ def check(url: str, output: Path, channel: str | None):
         page.mouse.wheel(0, -100)
         page.keyboard.up("Control")
         expect(frame.locator("img")).to_have_attribute("style", re.compile("scale"))
+        page.get_by_role("button", name="复位视图").first.click()
+        assert slider.input_value() == prior
+        expect(frame.locator("img")).to_have_attribute("style", re.compile(r"scale\(1\)"))
         for pane in page.locator(".pane").all():
             pane.get_by_role("button", name="通过", exact=True).click()
         page.locator(".pane").first.get_by_role("button", name="设为最终候选").click()
@@ -73,9 +78,9 @@ def check(url: str, output: Path, channel: str | None):
         flair = next(text for text in options if "FLAIR" in text)
         select.select_option(label=flair)
         expect(page.locator(".pane").nth(1).locator(".badge.excluded")).to_be_visible()
-        expect(page.locator(".frame img[src]")).to_have_count(6)
+        expect(page.locator(".frame img[src]")).to_have_count(2)
         expect(page.locator(".pane-head select").first.locator("option")).to_have_count(4)
-        expect(page.locator(".frame img[src]")).to_have_count(6)
+        expect(page.locator(".frame img[src]")).to_have_count(2)
         page.screenshot(path=str(output / "viewer.png"), full_page=True)
         assert not errors, errors
         assert not external, external
@@ -86,7 +91,7 @@ def check(url: str, output: Path, channel: str | None):
                     "page_errors": errors,
                     "external_requests": external,
                     "checks": [
-                        "six views",
+                        "two source-voxel views",
                         "slice",
                         "zoom",
                         "two passes one choice",

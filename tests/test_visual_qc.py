@@ -466,15 +466,25 @@ def test_preview_isolated_for_excluded_other_and_failure_retained(review, monkey
     assert len(service.subject("001")["candidates"]) == 5
 
 
-def test_neurological_left_right_physical_ratio_and_oblique(tmp_path):
-    data = np.indices((16, 20, 12))[0].astype(np.float32)
-    image = tmp_path / "asymmetric.nii.gz"
+def test_source_voxel_slice_is_exact_and_affine_independent(tmp_path):
+    data = np.arange(16 * 20 * 12, dtype=np.float32).reshape(16, 20, 12)
+    image = tmp_path / "source-grid.nii.gz"
     affine = np.diag([-2.0, 1.0, 3.0, 1.0])
     nib.save(nib.Nifti1Image(data, affine), image)
+    initial = digest(image)
     volume = VolumeCache()
-    pixels = np.array(Image.open(io.BytesIO(volume.slice_png(image, "axial", 15.0, 0.0, 15.0))))
-    assert pixels[:, 0].mean() > pixels[:, -1].mean()  # negative affine: L is voxel x=15
-    assert abs(pixels.shape[1] / pixels.shape[0] - 30 / 19) < 0.06
+    high = float(data.max())
+    png = volume.slice_png(image, 7, 0.0, high)
+    pixels = np.array(Image.open(io.BytesIO(png)))
+    expected_values = np.flipud(data[:, :, 7].T)
+    expected = np.round(expected_values / high * 255).astype(np.uint8)
+    np.testing.assert_array_equal(pixels, expected)
+    assert pixels.shape == (20, 16)
+    meta = volume.metadata(image)
+    assert meta["display_mode"] == "source_voxel_slices"
+    assert meta["slice_count"] == 12
+    assert meta["initial_slice"] == 6
+
     theta = np.deg2rad(35)
     affine[:3, :3] = [
         [1, 0, 0],
@@ -483,12 +493,16 @@ def test_neurological_left_right_physical_ratio_and_oblique(tmp_path):
     ]
     oblique = tmp_path / "oblique.nii.gz"
     nib.save(nib.Nifti1Image(data, affine), oblique)
-    initial = digest(oblique)
-    meta = volume.metadata(oblique)
-    for plane, axis in (("axial", 2), ("coronal", 1), ("sagittal", 0)):
-        value = (meta["bounds"][0][axis] + meta["bounds"][1][axis]) / 2
-        assert volume.slice_png(oblique, plane, value, 0, 15).startswith(b"\x89PNG")
-    assert digest(oblique) == initial
+    oblique_initial = digest(oblique)
+    assert volume.slice_png(oblique, 7, 0.0, high) == png
+    assert digest(image) == initial
+    assert digest(oblique) == oblique_initial
+    with pytest.raises(ValueError, match="slice index"):
+        volume.slice_png(image, -1, 0.0, high)
+    with pytest.raises(ValueError, match="slice index"):
+        volume.slice_png(image, 12, 0.0, high)
+    with pytest.raises(ValueError, match="integer"):
+        volume.slice_png(image, 1.5, 0.0, high)
 
 
 def test_invalid_multivolume_cannot_pass(review):
@@ -587,8 +601,12 @@ def test_http_token_origin_version_and_local_assets(review):
         assert b'id="others" type="checkbox" checked' in html
         assert b'id="episode"' not in html
         assert "按文件夹名独立选择序列".encode() in html
+        assert "原始NIfTI第三维体素切片".encode() in html
         assert b"comparisonCandidates" in script
         assert b"episode_confirmed" not in script
+        assert b"const planes" not in script
+        assert b"meta.bounds" not in script
+        assert b"index:slider.value" in script
         assert "展示序列".encode() in script
         assert "指定为 FLAIR".encode() in script
         with pytest.raises(HTTPError) as error:

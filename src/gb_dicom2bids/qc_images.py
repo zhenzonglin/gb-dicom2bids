@@ -1,9 +1,8 @@
-"""Bounded, affine-driven orthogonal previews. Source NIfTI is never resampled on disk."""
+"""Bounded previews of source voxel slices. Source NIfTI is never resampled or changed."""
 
 from __future__ import annotations
 
 import io
-import itertools
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -54,15 +53,13 @@ class VolumeCache:
             samples = data.ravel()[:: max(1, data.size // 1_000_000)]
             finite = samples[np.isfinite(samples)]
             low, high = np.percentile(finite, [1, 99]) if finite.size else (0, 1)
-            corners = np.array(list(itertools.product(*[(0, n - 1) for n in data.shape])))
-            world = nib.affines.apply_affine(image.affine, corners)
-            bounds = [world.min(axis=0).tolist(), world.max(axis=0).tolist()]
             value = {
                 "data": np.nan_to_num(data),
-                "inverse": np.linalg.inv(image.affine),
                 "shape": list(data.shape),
                 "zooms": list(map(float, image.header.get_zooms()[:3])),
-                "bounds": bounds,
+                "slice_count": int(data.shape[2]),
+                "initial_slice": int(data.shape[2] // 2),
+                "display_mode": "source_voxel_slices",
                 "window": [float(low), float(max(high, low + 1))],
                 "errors": errors,
             }
@@ -72,53 +69,22 @@ class VolumeCache:
             return value
 
     def metadata(self, path: Path) -> dict[str, Any]:
-        return {
-            key: value for key, value in self.get(path).items() if key not in {"data", "inverse"}
-        }
+        return {key: value for key, value in self.get(path).items() if key != "data"}
 
-    def slice_png(self, path: Path, plane: str, position: float, low: float, high: float) -> bytes:
+    def slice_png(self, path: Path, index: int, low: float, high: float) -> bytes:
+        """Render data[:, :, index] without interpolation, cropping or affine reslicing."""
+
         volume = self.get(path)
-        if plane not in {"axial", "coronal", "sagittal"}:
-            raise ValueError("invalid plane")
-        if not np.isfinite([position, low, high]).all() or high <= low:
+        if isinstance(index, bool) or not isinstance(index, (int, np.integer)):
+            raise ValueError("slice index must be an integer")
+        if not 0 <= int(index) < volume["slice_count"]:
+            raise ValueError("slice index outside source volume")
+        if not np.isfinite([low, high]).all() or high <= low:
             raise ValueError("invalid slice/window parameters")
-        minimum, maximum = map(np.array, volume["bounds"])
-        horizontal, vertical, fixed = {
-            "axial": (0, 1, 2),
-            "coronal": (0, 2, 1),
-            "sagittal": (1, 2, 0),
-        }[plane]
-        if not minimum[fixed] - 1e-4 <= position <= maximum[fixed] + 1e-4:
-            raise ValueError("slice outside image bounds")
-        lengths = maximum - minimum
-        step = max(min(volume["zooms"]), max(lengths[horizontal], lengths[vertical]) / 511)
-        width = max(2, int(round(lengths[horizontal] / step)) + 1)
-        height = max(2, int(round(lengths[vertical] / step)) + 1)
-        x, y = np.meshgrid(
-            np.linspace(minimum[horizontal], maximum[horizontal], width),
-            np.linspace(maximum[vertical], minimum[vertical], height),
-        )
-        world = np.ones((4, width * height))
-        world[horizontal] = x.ravel()
-        world[vertical] = y.ravel()
-        world[fixed] = position
-        coordinates = (volume["inverse"] @ world)[:3]
-        values = trilinear(volume["data"], coordinates).reshape(height, width)
+        # Transpose maps voxel i to screen x; flip places increasing j upward. These are
+        # lossless display operations: every source voxel appears exactly once.
+        values = np.flipud(volume["data"][:, :, int(index)].T)
         pixels = np.round(np.clip((values - low) / (high - low), 0, 1) * 255).astype(np.uint8)
         output = io.BytesIO()
         Image.fromarray(pixels).save(output, format="PNG")
         return output.getvalue()
-
-
-def trilinear(data: np.ndarray, coords: np.ndarray) -> np.ndarray:
-    base = np.floor(coords).astype(int)
-    fraction = coords - base
-    result = np.zeros(coords.shape[1], dtype=np.float32)
-    valid = np.all((coords >= -1e-5) & (coords <= np.array(data.shape)[:, None] - 1 + 1e-5), axis=0)
-    for offset in itertools.product((0, 1), repeat=3):
-        index = base + np.array(offset)[:, None]
-        index = np.clip(index, 0, np.array(data.shape)[:, None] - 1)
-        weight = np.prod(np.where(np.array(offset)[:, None], fraction, 1 - fraction), axis=0)
-        result += data[tuple(index)] * weight
-    result[~valid] = 0
-    return result

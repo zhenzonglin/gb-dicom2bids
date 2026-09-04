@@ -26,7 +26,11 @@ def _write_tsv(path: Path, rows: Iterable[dict[str, Any]], fields: list[str]) ->
 
 
 def write_inventory(
-    audit_root: Path, records: list[SeriesRecord], unreadable_relpaths: list[str]
+    audit_root: Path,
+    records: list[SeriesRecord],
+    unreadable_relpaths: list[str],
+    *,
+    error_status: str = "unreadable_or_non_dicom",
 ) -> None:
     audit_root.mkdir(parents=True, exist_ok=True)
     _write_tsv(
@@ -42,7 +46,7 @@ def write_inventory(
     _write_tsv(
         audit_root / "inventory_errors.tsv",
         (
-            {"source_relpath": path, "status": "unreadable_or_non_dicom"}
+            {"source_relpath": path, "status": error_status}
             for path in unreadable_relpaths
         ),
         ["source_relpath", "status"],

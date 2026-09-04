@@ -7,6 +7,14 @@ dataset without modifying source DICOM data.
 
 Author: **zhenzong**
 
+## NIfTI-only visual curation patch
+
+An independent workflow can inventory an already converted
+`center/subject/series/.../*.nii.gz` tree, review candidates in the same local viewer, and
+physically copy only approved T1/FLAIR images into a new empty BIDS dataset. It does not use an
+existing BIDS dataset or run a DICOM converter. See the
+[preconverted NIfTI workflow](docs/preconverted_nifti_qc.md).
+
 ## Optional visual QC patch for v0.2.0
 
 Run `python qc_viewer.py` in the existing environment for a loopback-only, offline reviewer.

@@ -182,6 +182,7 @@ def authorized_choice(
     modality = rating.get("modality") or record.candidate_type
     choice = decision.get("groups", {}).get(modality, {})
     plane = classify_orientation(record.image_orientation_patient, 20)
+    nifti_only = config.nifti_import.enabled
     valid = (
         rating.get("quality") == "pass"
         and choice.get("choice") == uid
@@ -189,10 +190,10 @@ def authorized_choice(
         and modality == record.candidate_type
         and rating.get("record_digest") == record_digest(record)
         and record.modality == "MR"
-        and record.orientation_consistent
-        and plane.normal is not None
+        and (nifti_only or (record.orientation_consistent and plane.normal is not None))
         and (
             modality == "flair"
+            or nifti_only
             or (
                 modality == "t1"
                 and plane.plane == "axial"

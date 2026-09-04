@@ -11,7 +11,7 @@ dist/
 .venv/
 
 # Runtime configuration and generated state
-config/config.local.yaml
+config/*.local.yaml
 .env
 data/
 work/

@@ -72,6 +72,17 @@ class ToolsConfig:
 
 
 @dataclass(frozen=True)
+class NiftiImportConfig:
+    """Read-only source for an already converted, NIfTI-only collection."""
+
+    source_root: Path | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.source_root is not None
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     paths: PathsConfig
     dataset: DatasetConfig
@@ -80,6 +91,7 @@ class ProjectConfig:
     tools: ToolsConfig
     inventory: InventoryConfig = field(default_factory=InventoryConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    nifti_import: NiftiImportConfig = field(default_factory=NiftiImportConfig)
 
     @property
     def work_root(self) -> Path:
@@ -114,17 +126,35 @@ def load_config(path: str | Path) -> ProjectConfig:
         raise ConfigError("configuration root must be a mapping")
 
     paths_raw = _section(raw, "paths")
-    required = ("dicom_root", "existing_bids_root", "staging_bids_root", "audit_root")
+    nifti_raw = _section(raw, "nifti_import")
+    source_value = nifti_raw.get("source_root")
+    nifti_source = (
+        _absolute_path(source_value, "nifti_import.source_root")
+        if source_value is not None
+        else None
+    )
+    required = ("staging_bids_root", "audit_root")
+    if nifti_source is None:
+        required = ("dicom_root", "existing_bids_root", *required)
     missing = [key for key in required if key not in paths_raw]
     if missing:
         raise ConfigError(f"missing path keys: {', '.join(missing)}")
+    audit_root = _absolute_path(paths_raw["audit_root"], "paths.audit_root")
     paths = PathsConfig(
-        dicom_root=_absolute_path(paths_raw["dicom_root"], "paths.dicom_root"),
-        existing_bids_root=_absolute_path(
-            paths_raw["existing_bids_root"], "paths.existing_bids_root"
+        # These aliases keep the DICOM pipeline data model backward compatible. They are
+        # never read as DICOM/legacy BIDS by the dedicated NIfTI-import entry point.
+        dicom_root=(
+            _absolute_path(paths_raw["dicom_root"], "paths.dicom_root")
+            if "dicom_root" in paths_raw
+            else nifti_source
+        ),
+        existing_bids_root=(
+            _absolute_path(paths_raw["existing_bids_root"], "paths.existing_bids_root")
+            if "existing_bids_root" in paths_raw
+            else audit_root.parent / ".no-existing-bids"
         ),
         staging_bids_root=_absolute_path(paths_raw["staging_bids_root"], "paths.staging_bids_root"),
-        audit_root=_absolute_path(paths_raw["audit_root"], "paths.audit_root"),
+        audit_root=audit_root,
         work_root=(
             _absolute_path(paths_raw["work_root"], "paths.work_root")
             if "work_root" in paths_raw
@@ -138,7 +168,21 @@ def load_config(path: str | Path) -> ProjectConfig:
     tools = ToolsConfig(**_section(raw, "tools"))
     inventory = InventoryConfig(**_section(raw, "inventory"))
     runtime = RuntimeConfig(**_section(raw, "runtime"))
-    config = ProjectConfig(paths, dataset, selection, conversion, tools, inventory, runtime)
+    unknown_nifti = set(nifti_raw) - {"source_root"}
+    if unknown_nifti:
+        raise ConfigError(
+            "unknown nifti_import keys: " + ", ".join(sorted(unknown_nifti))
+        )
+    config = ProjectConfig(
+        paths,
+        dataset,
+        selection,
+        conversion,
+        tools,
+        inventory,
+        runtime,
+        NiftiImportConfig(nifti_source),
+    )
     validate_config(config)
     return config
 
@@ -153,19 +197,27 @@ def _is_within(candidate: Path, parent: Path) -> bool:
 
 def validate_config(config: ProjectConfig) -> None:
     paths = config.paths
-    all_paths = {
-        "dicom_root": paths.dicom_root,
-        "existing_bids_root": paths.existing_bids_root,
-        "staging_bids_root": paths.staging_bids_root,
-        "audit_root": paths.audit_root,
-    }
+    if config.nifti_import.enabled:
+        all_paths = {
+            "nifti_root": config.nifti_import.source_root,
+            "staging_bids_root": paths.staging_bids_root,
+            "audit_root": paths.audit_root,
+        }
+        sources = (config.nifti_import.source_root,)
+    else:
+        all_paths = {
+            "dicom_root": paths.dicom_root,
+            "existing_bids_root": paths.existing_bids_root,
+            "staging_bids_root": paths.staging_bids_root,
+            "audit_root": paths.audit_root,
+        }
+        sources = (paths.dicom_root, paths.existing_bids_root)
     if paths.work_root is not None:
         all_paths["work_root"] = paths.work_root
     normalized = [path.resolve(strict=False) for path in all_paths.values()]
     if len(set(normalized)) != len(normalized):
-        raise ConfigError("DICOM, existing BIDS, staging BIDS, and audit roots must be distinct")
+        raise ConfigError("source, staging BIDS, audit, and work roots must be distinct")
 
-    sources = (paths.dicom_root, paths.existing_bids_root)
     destinations = (paths.staging_bids_root, paths.audit_root, config.work_root)
     for destination in destinations:
         for source in sources:
@@ -204,6 +256,13 @@ def validate_config(config: ProjectConfig) -> None:
 
 
 def require_inputs(config: ProjectConfig, *, need_existing_bids: bool = False) -> None:
+    if config.nifti_import.enabled:
+        source = config.nifti_import.source_root
+        if source is None or not source.is_dir():
+            raise ConfigError(f"NIfTI source root does not exist: {source}")
+        if need_existing_bids:
+            raise ConfigError("preconverted NIfTI mode does not use an existing BIDS dataset")
+        return
     if not config.paths.dicom_root.is_dir():
         raise ConfigError(f"DICOM root does not exist: {config.paths.dicom_root}")
     if need_existing_bids and not config.paths.existing_bids_root.is_dir():

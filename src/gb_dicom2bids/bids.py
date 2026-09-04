@@ -30,14 +30,20 @@ def ensure_dataset_metadata(config: ProjectConfig) -> None:
 
     readme = root / "README"
     if not readme.exists():
+        source = "preconverted NIfTI" if config.nifti_import.enabled else "DICOM"
         readme.write_text(
-            "Multicenter structural MRI dataset curated from DICOM.\n"
-            "Conversion decisions and protected provenance are stored outside this BIDS root.\n",
+            f"Multicenter structural MRI dataset curated from {source}.\n"
+            "Selection decisions and protected provenance are stored outside this BIDS root.\n",
             encoding="utf-8",
         )
 
 
-def update_participants(config: ProjectConfig, records: list[SeriesRecord]) -> None:
+def update_participants(
+    config: ProjectConfig,
+    records: list[SeriesRecord],
+    *,
+    replace_existing: bool = False,
+) -> None:
     root = config.paths.staging_bids_root
     path = root / "participants.tsv"
     existing: dict[str, dict[str, str]] = {}
@@ -48,7 +54,7 @@ def update_participants(config: ProjectConfig, records: list[SeriesRecord]) -> N
             fields = list(reader.fieldnames or fields)
             for row in reader:
                 participant_id = row.get("participant_id", "")
-                if participant_id:
+                if participant_id and not replace_existing:
                     existing[participant_id] = dict(row)
     if "site_id" not in fields:
         fields.append("site_id")
@@ -125,11 +131,16 @@ def update_scans(
     metadata: dict[str, Any] = {}
     if sidecar.exists():
         metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+    plane_description = (
+        "Acquisition plane when retained in source metadata; unknown for NIfTI-only input"
+        if config.nifti_import.enabled
+        else "DICOM geometry-derived acquisition plane"
+    )
     metadata.update(
         {
             "protocol_id": {"LongName": "Curated acquisition protocol identifier"},
-            "source_plane": {"LongName": "DICOM geometry-derived acquisition plane"},
-            "source_kind": {"LongName": "Original or scanner-derived source classification"},
+            "source_plane": {"LongName": plane_description},
+            "source_kind": {"LongName": "Input source classification"},
             "selection_qc": {"LongName": "Reason for curated sequence selection"},
         }
     )

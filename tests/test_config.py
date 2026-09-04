@@ -50,3 +50,23 @@ def test_relative_paths_are_rejected(tmp_path) -> None:
     )
     with pytest.raises(ConfigError, match="absolute"):
         load_config(path)
+
+
+def test_nifti_only_config_needs_no_dicom_or_existing_bids(tmp_path) -> None:
+    path = tmp_path / "nifti.yaml"
+    source, staging, audit = (tmp_path / name for name in ("source", "staging", "audit"))
+    path.write_text(
+        "paths:\n"
+        f"  staging_bids_root: {staging}\n"
+        f"  audit_root: {audit}\n"
+        "nifti_import:\n"
+        f"  source_root: {source}\n"
+        "conversion:\n"
+        "  seed_from_existing_bids: false\n",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.nifti_import.enabled
+    assert config.nifti_import.source_root == source
+    assert config.paths.dicom_root == source
+    assert config.paths.existing_bids_root != staging

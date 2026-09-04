@@ -109,6 +109,10 @@ class ReviewService:
         if uid in self._times:
             return self._times[uid]
         record = self.require_uid(uid)
+        if self.config.nifti_import.enabled:
+            result = {"note": "NIfTI-only source; acquisition date/time unavailable"}
+            self._times[uid] = result
+            return result
         private_path = self.root / "timings" / f"{uid}.json"
         saved = read_json(private_path)
         if saved.get("record_digest") == record_digest(record):
@@ -258,6 +262,8 @@ class ReviewService:
                 self.config.paths.audit_root.resolve(),
                 self.config.paths.staging_bids_root.resolve(),
             ]
+            if self.config.nifti_import.source_root is not None:
+                allowed.append(self.config.nifti_import.source_root.resolve())
             if not all(
                 any(file.resolve().is_relative_to(root) for root in allowed)
                 for file in (image, sidecar)
@@ -339,6 +345,35 @@ class ReviewService:
                 self.jobs[uid] = {"state": "interrupted"}
                 return
             self.jobs[uid] = {"state": "converting"}
+            if self.config.nifti_import.enabled:
+                source_root = self.config.nifti_import.source_root
+                if source_root is None or len(record.source_relpaths) != 1:
+                    raise ValueError("invalid NIfTI source record")
+                image = (source_root / record.source_relpaths[0]).resolve()
+                image.relative_to(source_root.resolve())
+                self.volumes.metadata(image)
+                sidecar = self.root / "sidecars" / f"{uid}.json"
+                atomic_write_json(
+                    sidecar,
+                    {
+                        "SourceFormat": "preconverted_nifti",
+                        "SourceMetadataAvailable": False,
+                    },
+                )
+                value = {
+                    "id": uid,
+                    "record_digest": record_digest(record),
+                    "image": str(image),
+                    "sidecar": str(sidecar),
+                    "image_sha256": digest(image),
+                    "sidecar_sha256": digest(sidecar),
+                    "log": "",
+                    "created_at": utc_now(),
+                }
+                with self.lock:
+                    atomic_write_json(self.root / "artifacts" / f"{uid}.json", value)
+                self.jobs[uid] = {"state": "ready"}
+                return
             isolated = replace(
                 self.config,
                 paths=replace(
@@ -471,21 +506,20 @@ class ReviewService:
                     raise ValueError(
                         "final choice must be an approved candidate of this subject/modality"
                     )
-                source_plane = classify_orientation(record.image_orientation_patient, 20)
-                if (
-                    record.modality != "MR"
-                    or not record.orientation_consistent
-                    or source_plane.normal is None
-                ):
-                    raise ValueError("final choice requires reliable source geometry")
-                if modality == "t1" and (
-                    source_plane.plane != "axial"
-                    or record.plane != "axial"
-                    or record.source_kind not in {"original", "derived_mpr"}
-                ):
-                    raise ValueError(
-                        "T1 must be original axial or axial MPR; sagittal fallback is disabled"
-                    )
+                if record.modality != "MR":
+                    raise ValueError("final choice must be an MR image")
+                if not self.config.nifti_import.enabled:
+                    source_plane = classify_orientation(record.image_orientation_patient, 20)
+                    if not record.orientation_consistent or source_plane.normal is None:
+                        raise ValueError("final choice requires reliable source geometry")
+                    if modality == "t1" and (
+                        source_plane.plane != "axial"
+                        or record.plane != "axial"
+                        or record.source_kind not in {"original", "derived_mpr"}
+                    ):
+                        raise ValueError(
+                            "T1 must be original axial or axial MPR; sagittal fallback is disabled"
+                        )
                 artifact = self.artifact(uid)
                 _validate_converted_pair(
                     Path(artifact["image"]),
@@ -645,7 +679,8 @@ class ReviewService:
                     rows_by_group[(original.subject_id, effective[rid].candidate_type)].append(
                         (row, rid)
                     )
-            update_participants(self.config, list(effective.values()))
+            if not self.config.nifti_import.enabled:
+                update_participants(self.config, list(effective.values()))
             pending = []
             for action in actions:
                 cert_path = (
@@ -683,12 +718,16 @@ class ReviewService:
                         image, sidecar = Path(artifact["image"]), Path(artifact["sidecar"])
                         _validate_converted_pair(image, sidecar, record)
                         manual = (
-                            "accept_flair"
-                            if modality == "flair"
+                            "accept_preconverted"
+                            if self.config.nifti_import.enabled
                             else (
-                                "accept_mpr"
-                                if record.source_kind == "derived_mpr"
-                                else "accept_original"
+                                "accept_flair"
+                                if modality == "flair"
+                                else (
+                                    "accept_mpr"
+                                    if record.source_kind == "derived_mpr"
+                                    else "accept_original"
+                                )
                             )
                         )
                         suffix = "FLAIR" if modality == "flair" else "T1w"
@@ -779,11 +818,32 @@ class ReviewService:
                     )
                     self.write_accepted()
                     raise
+            if self.config.nifti_import.enabled:
+                installed_subjects = {
+                    path.parent.parent.name.removeprefix("sub-")
+                    for path in self.config.paths.staging_bids_root.glob(
+                        "sub-*/anat/*.nii.gz"
+                    )
+                }
+                update_participants(
+                    self.config,
+                    [
+                        record
+                        for record in effective.values()
+                        if record.subject_id in installed_subjects
+                    ],
+                    replace_existing=True,
+                )
             # Write large cohort manifests once, not once per subject. Incomplete transactions
             # have no installed certificate and are replayed safely after an interruption.
             write_selection(self.config.paths.audit_root, live_rows, list(effective.values()))
+            diff_name = (
+                "nifti_to_bids_diff.tsv"
+                if self.config.nifti_import.enabled
+                else "old_vs_v4_diff.tsv"
+            )
             _write_diff(
-                self.config.paths.audit_root / "old_vs_v4_diff.tsv",
+                self.config.paths.audit_root / diff_name,
                 [diff for _, _, _, changes in pending for diff in changes],
             )
             for action, _transaction, cert, _diffs in pending:
@@ -819,7 +879,11 @@ class ReviewService:
                         "series_uid_hash": record.series_uid_hash,
                         "candidate_type": record.candidate_type,
                         "status": "converted",
-                        "mode": "visual_qc_apply",
+                        "mode": (
+                            "preconverted_nifti_visual_qc_apply"
+                            if self.config.nifti_import.enabled
+                            else "visual_qc_apply"
+                        ),
                         "output_path": cert["image"],
                         "sidecar_path": cert["sidecar"],
                         "output_sha256": cert["image_sha256"],
@@ -910,11 +974,11 @@ class ReviewService:
         accepted = {(row["subject_id"], row["modality"]): row for row in self.write_accepted()}
         old = self.config.paths.existing_bids_root
         staging = self.config.paths.staging_bids_root
-        subjects = (
-            set(self.by_subject)
-            | {p.name[4:] for p in old.glob("sub-*") if p.is_dir()}
-            | {p.name[4:] for p in staging.glob("sub-*") if p.is_dir()}
-        )
+        subjects = set(self.by_subject) | {
+            p.name[4:] for p in staging.glob("sub-*") if p.is_dir()
+        }
+        if not self.config.nifti_import.enabled:
+            subjects |= {p.name[4:] for p in old.glob("sub-*") if p.is_dir()}
         rows = []
         for subject in sorted(subjects):
             decision = read_decision(self.root, subject)
@@ -953,8 +1017,14 @@ class ReviewService:
                     {
                         "subject_id": subject,
                         "modality": modality,
-                        "dicom_candidates": len(candidates),
-                        "old_bids_files": len(old_files),
+                        (
+                            "source_candidates"
+                            if self.config.nifti_import.enabled
+                            else "dicom_candidates"
+                        ): len(candidates),
+                        "old_bids_files": (
+                            "not_used" if self.config.nifti_import.enabled else len(old_files)
+                        ),
                         "staging_files": len(new_files),
                         "certified": bool(cert),
                         "newly_added": bool(cert and not old_files),

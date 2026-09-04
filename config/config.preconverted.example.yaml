@@ -1,0 +1,32 @@
+paths:
+  staging_bids_root: /path/to/new/empty/bids
+  audit_root: /path/to/private/nifti-qc-audit
+  work_root: /path/to/local/scratch/nifti-qc
+
+nifti_import:
+  source_root: /path/to/read-only/preconverted-nifti
+
+dataset:
+  name: Multicenter structural MRI curated from preconverted NIfTI
+  bids_version: "1.11.1"
+  single_session: true
+
+conversion:
+  seed_from_existing_bids: false
+  convert_review_candidates: false
+  anonymize_sidecars: true
+  compression: pigz
+  compression_threads: 2
+  workers: 2
+  pilot_workers: 2
+  resume: true
+
+inventory:
+  workers: 16
+
+runtime:
+  status_interval_seconds: 5
+  resource_interval_seconds: 30
+  minimum_work_free_gb: 20
+  minimum_staging_free_gb: 500
+  minimum_available_memory_gb: 64

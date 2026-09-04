@@ -28,6 +28,12 @@ def check(url: str, output: Path, channel: str | None):
         expect(page.locator(".pane")).to_have_count(2)
         expect(page.locator(".frame img[src]")).to_have_count(6)
         expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
+        expect(
+            page.locator(".pane-head select").first.locator("option:checked")
+        ).to_contain_text("T1")
+        expect(
+            page.locator(".pane-head select").nth(1).locator("option:checked")
+        ).to_contain_text("FLAIR")
         second = context.new_page()
         second.goto(url, wait_until="networkidle")
         # Slice coordinates and CSS transforms must actually change on user interaction.
@@ -53,14 +59,14 @@ def check(url: str, output: Path, channel: str | None):
         page.reload(wait_until="networkidle")
         expect(page.locator("#revision")).to_have_text("记录版本 1")
         expect(page.locator(".quality button[data-value=pass].chosen")).to_have_count(2)
-        # Excluded FLAIR remains selectable and viewable; other sequences are opt-in.
+        # T1 and FLAIR are the default comparison pair; all other candidates remain selectable.
+        expect(page.locator("#others")).to_be_checked()
         select = page.locator(".pane-head select").nth(1)
         options = select.locator("option").all_text_contents()
         flair = next(text for text in options if "FLAIR" in text)
         select.select_option(label=flair)
         expect(page.locator(".pane").nth(1).locator(".badge.excluded")).to_be_visible()
         expect(page.locator(".frame img[src]")).to_have_count(6)
-        page.locator("#others").check()
         expect(page.locator(".pane-head select").first.locator("option")).to_have_count(4)
         expect(page.locator(".frame img[src]")).to_have_count(6)
         page.screenshot(path=str(output / "viewer.png"), full_page=True)

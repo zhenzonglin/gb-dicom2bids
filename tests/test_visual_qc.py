@@ -581,8 +581,11 @@ def test_http_token_origin_version_and_local_assets(review):
         return urlopen(req, timeout=10)
 
     try:
-        assert b"test-token" in request("/").read()
-        assert request("/app.js").status == 200
+        html = request("/").read()
+        script = request("/app.js").read()
+        assert b"test-token" in html
+        assert b'id="others" type="checkbox" checked' in html
+        assert b"comparisonCandidates" in script
         with pytest.raises(HTTPError) as error:
             request("/api/subjects", token="wrong")
         assert error.value.code == 403

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import os
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +18,19 @@ import numpy as np
 from .classify import classify_record
 from .config import ProjectConfig, load_config, require_inputs
 from .dicom import sanitize_subject_label
-from .manifest import write_inventory, write_selection
+from .manifest import load_private_records, load_selection, write_inventory, write_selection
 from .models import SelectionRow, SeriesRecord
 from .orientation import classify_normal
-from .runtime import atomic_write_json, utc_now
+from .qc_state import (
+    assert_pipeline_idle,
+    candidate_id,
+    effective_modality,
+    file_lock,
+    qc_root,
+    read_decision,
+    writer_lock,
+)
+from .runtime import atomic_write_json, read_json, utc_now
 
 
 def _hash(value: str) -> str:
@@ -238,12 +249,110 @@ def inventory_preconverted(config: ProjectConfig) -> dict[str, Any]:
         raise
 
 
+def _inventory_errors(audit_root: Path) -> list[str]:
+    path = audit_root / "inventory_errors.tsv"
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8", newline="") as handle:
+        return [
+            row["source_relpath"]
+            for row in csv.DictReader(handle, delimiter="\t")
+            if row.get("source_relpath")
+        ]
+
+
+def refresh_classification(config: ProjectConfig) -> dict[str, Any]:
+    """Reclassify an existing NIfTI inventory without scanning or modifying sources."""
+    if not config.nifti_import.enabled:
+        raise ValueError("classification refresh is only available in NIfTI-only mode")
+    audit_root = config.paths.audit_root
+    selection_path = audit_root / "selection_manifest.tsv"
+    if not (audit_root / "series_sources.json").is_file() or not selection_path.is_file():
+        raise ValueError("run the NIfTI inventory once before refreshing classification")
+
+    root = qc_root(config)
+    with writer_lock(config), file_lock(root / ".decisions.lock"):
+        assert_pipeline_idle(config)
+        records = load_private_records(audit_root)
+        rows = load_selection(selection_path)
+        before = Counter(record.candidate_type for record in records)
+        changed = 0
+        refreshed: list[SeriesRecord] = []
+        for record in records:
+            new_type = classify_record(replace(record)).candidate_type
+            changed += new_type != record.candidate_type
+            # Only the automatic class changes. Source identity, geometry and the
+            # record digest used by saved visual decisions remain unchanged.
+            refreshed.append(replace(record, candidate_type=new_type))
+
+        by_key = {
+            (record.subject_id, record.study_uid_hash, record.series_uid_hash): record
+            for record in refreshed
+        }
+        saved_subjects = {path.stem for path in (root / "subjects").glob("*.json")}
+        saved_subjects |= {
+            path.name for path in (root / "history").glob("*") if path.is_dir()
+        }
+        decisions = {subject: read_decision(root, subject) for subject in saved_subjects}
+        for row in rows:
+            record = by_key.get((row.subject_id, row.study_uid_hash, row.series_uid_hash))
+            if record is None:
+                continue
+            rating = (
+                decisions.get(record.subject_id, {})
+                .get("candidates", {})
+                .get(candidate_id(record))
+            )
+            row.candidate_type = effective_modality(record, rating)
+
+        errors = _inventory_errors(audit_root)
+        write_inventory(
+            audit_root,
+            refreshed,
+            errors,
+            error_status="unreadable_or_unsupported_nifti",
+        )
+        write_selection(audit_root, rows, refreshed)
+        after = Counter(record.candidate_type for record in refreshed)
+        refreshed_at = utc_now()
+        summary: dict[str, Any] = {
+            "status": "completed",
+            "changed_candidates": changed,
+            "before": {key: before[key] for key in ("t1", "flair", "other")},
+            "after": {key: after[key] for key in ("t1", "flair", "other")},
+            "refreshed_at": refreshed_at,
+            "source_scan_performed": False,
+        }
+        atomic_write_json(root / "classification_refresh.json", summary)
+        import_status = read_json(audit_root / "nifti_import_status.json")
+        import_status.update(
+            {
+                "t1_candidates": after["t1"],
+                "flair_candidates": after["flair"],
+                "other_candidates": after["other"],
+                "classification_refreshed_at": refreshed_at,
+            }
+        )
+        atomic_write_json(audit_root / "nifti_import_status.json", import_status)
+        return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("config/config.local.yaml"))
+    parser.add_argument(
+        "--refresh-classification",
+        action="store_true",
+        help="update T1/FLAIR suggestions in the existing inventory without rescanning sources",
+    )
     args = parser.parse_args(argv)
     try:
-        summary = inventory_preconverted(load_config(args.config))
+        config = load_config(args.config)
+        summary = (
+            refresh_classification(config)
+            if args.refresh_classification
+            else inventory_preconverted(config)
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"ERROR: {exc}", flush=True)
         return 2

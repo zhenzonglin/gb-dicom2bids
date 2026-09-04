@@ -38,6 +38,48 @@ def test_flair_name_and_timing_classification(record_factory) -> None:
     assert result.classification_confidence == "medium"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "202106281256__MR__0702__eFLAIR-longTR-CLEAR",
+        "3D_FLAIR",
+        "T2-FLAIR",
+        "T1-FLAIR",
+    ],
+)
+def test_flair_keyword_is_recognized_anywhere(record_factory, description) -> None:
+    record = record_factory(
+        series_description=description,
+        protocol_name="",
+        sequence_name="",
+        candidate_type="other",
+        protocol_id="",
+        source_kind="unknown",
+    )
+    assert classify_record(record).candidate_type == "flair"
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "202106281256__MR__0602__eT1W-SE",
+        "sT1-3D",
+        "T1+C",
+        "3D-T1",
+    ],
+)
+def test_t1_keyword_is_recognized_anywhere(record_factory, description) -> None:
+    record = record_factory(
+        series_description=description,
+        protocol_name="",
+        sequence_name="",
+        candidate_type="other",
+        protocol_id="",
+        source_kind="unknown",
+    )
+    assert classify_record(record).candidate_type == "t1"
+
+
 def test_localizer_is_excluded(record_factory) -> None:
     record = record_factory(
         series_description="T1 localizer",

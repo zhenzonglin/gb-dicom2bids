@@ -15,6 +15,12 @@ physically copy only approved T1/FLAIR images into a new empty BIDS dataset. It 
 existing BIDS dataset or run a DICOM converter. See the
 [preconverted NIfTI workflow](docs/preconverted_nifti_qc.md).
 
+Automatic NIfTI suggestions use case-insensitive substring matching of series-folder and file
+names (`eFLAIR` is FLAIR and `eT1W` is T1). Existing inventories can be updated without a source
+rescan using `python nifti_qc.py --config <local-config> --refresh-classification`. Both viewer
+panes can independently select any folder-named sequence and manually designate it as T1, FLAIR,
+or other before the quality and final-candidate decisions are saved.
+
 ## Optional visual QC patch for v0.2.0
 
 Run `python qc_viewer.py` in the existing environment for a loopback-only, offline reviewer.

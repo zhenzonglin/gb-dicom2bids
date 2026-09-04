@@ -30,6 +30,7 @@ from .qc_state import (
     assert_pipeline_idle,
     candidate_id,
     digest,
+    effective_modality,
     file_lock,
     qc_root,
     read_decision,
@@ -152,8 +153,7 @@ class ReviewService:
             decision = self.decisions.get(subject, {})
             ratings = decision.get("candidates", {})
             counts = Counter(
-                ratings.get(uid, {}).get("modality") or self.records[uid].candidate_type
-                for uid in uids
+                effective_modality(self.records[uid], ratings.get(uid)) for uid in uids
             )
             if not counts["t1"] and not counts["flair"] and filters.get("others") != "1":
                 continue
@@ -451,14 +451,26 @@ class ReviewService:
         groups = raw.get("groups", {})
         if not isinstance(ratings, dict) or not isinstance(groups, dict):
             raise ValueError("invalid decision structure")
+        prior_ratings = read_decision(self.root, subject).get("candidates", {})
         groups = {"t1": {}, "flair": {}, **groups}
         for uid, rating in ratings.items():
             record = self.require_uid(uid)
             if record.subject_id != subject or not isinstance(rating, dict):
                 raise ValueError("candidate belongs to another subject")
             quality = rating.get("quality", "unreviewed")
-            modality = rating.get("modality") or record.candidate_type
             reason = str(rating.get("reason", "")).strip()
+            modality = rating.get("modality") or record.candidate_type
+            prior_rating = prior_ratings.get(uid, {})
+            stale_unreviewed_default = (
+                quality == "unreviewed"
+                and not reason
+                and modality != record.candidate_type
+                and prior_rating.get("quality") == "unreviewed"
+                and not str(prior_rating.get("reason", "")).strip()
+                and prior_rating.get("modality") == modality
+            )
+            if stale_unreviewed_default:
+                modality = record.candidate_type
             if quality not in {"unreviewed", "pass", "fail", "defer"} or modality not in {
                 "t1",
                 "flair",
@@ -661,11 +673,10 @@ class ReviewService:
             effective = {
                 uid: replace(
                     record,
-                    candidate_type=decisions.get(record.subject_id, {})
-                    .get("candidates", {})
-                    .get(uid, {})
-                    .get("modality")
-                    or record.candidate_type,
+                    candidate_type=effective_modality(
+                        record,
+                        decisions.get(record.subject_id, {}).get("candidates", {}).get(uid),
+                    ),
                 )
                 for uid, record in self.records.items()
             }
@@ -986,9 +997,8 @@ class ReviewService:
                 candidates = [
                     uid
                     for uid in self.by_subject.get(subject, [])
-                    if (
-                        decision.get("candidates", {}).get(uid, {}).get("modality")
-                        or self.records[uid].candidate_type
+                    if effective_modality(
+                        self.records[uid], decision.get("candidates", {}).get(uid)
                     )
                     == modality
                 ]

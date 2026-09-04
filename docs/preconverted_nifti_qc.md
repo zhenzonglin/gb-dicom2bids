@@ -32,8 +32,24 @@ attempt to overwrite an existing inventory.
 
 Inspect `nifti_import_status.json`, `series_inventory.tsv`, `inventory_errors.tsv`, and
 `selection_manifest.tsv` under the private audit root before review. Filename/folder tokens are
-only an initial T1/FLAIR suggestion. Candidates without a recognized token remain `other` and
-must be found with the viewer's “include other series” filter.
+only an initial T1/FLAIR suggestion. Matching is case-insensitive and substring-based: names
+containing `flair` (for example `eFLAIR-longTR-CLEAR`) are suggested as FLAIR, then names
+containing `t1` (for example `eT1W-SE`) or a supported T1-family keyword are suggested as T1.
+Localizer/scout/survey and derived-display keywords remain excluded. FLAIR takes precedence when
+a name contains both `t1` and `flair`. Candidates without a recognized token remain `other`.
+
+If the inventory was created by an earlier version, stop the viewer and update only its automatic
+classification:
+
+```bash
+python nifti_qc.py \
+  --config config/config.nifti.local.yaml \
+  --refresh-classification
+```
+
+This command does not rescan source files, recreate the inventory, alter saved manual decisions,
+or write staging. It updates the candidate counts in `nifti_import_status.json` and writes a
+private summary to `visual_qc/classification_refresh.json`. Restart the viewer afterwards.
 
 ## Review and copy approved files
 
@@ -41,8 +57,10 @@ must be found with the viewer's “include other series” filter.
 python qc_viewer.py --config config/config.nifti.local.yaml
 ```
 
-Review the full volume, set the correct modality, record pass/fail/defer, and select at most one
-final candidate per modality. Different series folders have no surviving examination identity;
+Both display panes have independent sequence selectors whose labels start with the source series
+folder name. Choose any sequence, explicitly designate it as T1, FLAIR, or other, record
+pass/fail/defer, and select at most one final candidate per modality. Manual reclassification
+requires a reason. Different series folders have no surviving examination identity;
 selecting across them requires an explicit confirmation that they belong to the same examination.
 
 Saving records decisions only. Preview preparation reads and hashes the selected source on demand;

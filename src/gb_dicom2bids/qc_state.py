@@ -39,6 +39,17 @@ def record_digest(record: SeriesRecord) -> str:
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
+def effective_modality(record: SeriesRecord, rating: dict[str, Any] | None) -> str:
+    """Return a deliberate manual modality, otherwise the current automatic class."""
+    if not isinstance(rating, dict):
+        return record.candidate_type
+    quality = rating.get("quality", "unreviewed")
+    reason = str(rating.get("reason", "")).strip()
+    if quality != "unreviewed" or reason:
+        return rating.get("modality") or record.candidate_type
+    return record.candidate_type
+
+
 def qc_root(config: ProjectConfig) -> Path:
     return config.paths.audit_root / "visual_qc"
 
@@ -179,7 +190,7 @@ def authorized_choice(
     decision = read_decision(qc_root(config), record.subject_id)
     uid = candidate_id(record)
     rating = decision.get("candidates", {}).get(uid, {})
-    modality = rating.get("modality") or record.candidate_type
+    modality = effective_modality(record, rating)
     choice = decision.get("groups", {}).get(modality, {})
     plane = classify_orientation(record.image_orientation_patient, 20)
     nifti_only = config.nifti_import.enabled
@@ -233,6 +244,6 @@ def overlay_records(config: ProjectConfig, records: list[SeriesRecord]) -> list[
         if not decision:
             decision.update(read_decision(qc_root(config), record.subject_id))
         rating = decision.get("candidates", {}).get(candidate_id(record), {})
-        modality = rating.get("modality") or record.candidate_type
+        modality = effective_modality(record, rating)
         result.append(replace(record, candidate_type=modality))
     return result

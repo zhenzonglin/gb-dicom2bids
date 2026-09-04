@@ -585,7 +585,10 @@ def test_http_token_origin_version_and_local_assets(review):
         script = request("/app.js").read()
         assert b"test-token" in html
         assert b'id="others" type="checkbox" checked' in html
+        assert "按文件夹名独立选择序列".encode() in html
         assert b"comparisonCandidates" in script
+        assert "展示序列".encode() in script
+        assert "指定为 FLAIR".encode() in script
         with pytest.raises(HTTPError) as error:
             request("/api/subjects", token="wrong")
         assert error.value.code == 403

@@ -39,10 +39,12 @@ def write_inventory(
         INVENTORY_FIELDS,
     )
     private_path = audit_root / "series_sources.json"
-    private_path.write_text(
+    temporary = private_path.with_suffix(private_path.suffix + ".tmp")
+    temporary.write_text(
         json.dumps([record.private_dict() for record in records], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temporary.replace(private_path)
     _write_tsv(
         audit_root / "inventory_errors.tsv",
         (

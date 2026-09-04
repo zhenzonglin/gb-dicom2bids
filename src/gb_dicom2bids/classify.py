@@ -5,23 +5,17 @@ import re
 
 from .models import SeriesRecord
 
-T1_TOKENS = (
-    " t1 ",
-    " t1w ",
-    " et1w ",
-    " mprage ",
-    " bravo ",
-    " spgr ",
-    " tfl3d ",
-    " t1seg ",
+T1_KEYWORDS = (
+    "t1",
+    "mprage",
+    "bravo",
+    "spgr",
+    "tfl3d",
 )
-FLAIR_TOKENS = (
-    " flair ",
-    " t2flair ",
-    " t2 flair ",
-    " darkfluid ",
-    " dark fluid ",
-    " fluid attenuated ",
+FLAIR_KEYWORDS = (
+    "flair",
+    "darkfluid",
+    "fluidattenuated",
 )
 EXCLUDED_TOKENS = (
     " localizer ",
@@ -39,6 +33,12 @@ def normalized_text(*values: str) -> str:
     text = " ".join(value or "" for value in values).lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return f" {text.strip()} "
+
+
+def compact_text(*values: str) -> str:
+    """Normalize names for case-insensitive substring classification."""
+    text = " ".join(value or "" for value in values).lower()
+    return re.sub(r"[^a-z0-9]+", "", text)
 
 
 def source_kind(image_type: list[str], description: str, protocol: str) -> str:
@@ -69,27 +69,28 @@ def _plausible_flair_timing(record: SeriesRecord) -> bool:
 
 
 def classify_record(record: SeriesRecord) -> SeriesRecord:
-    text = normalized_text(
+    values = (
         record.series_description,
         record.protocol_name,
         record.sequence_name,
         " ".join(record.image_type),
     )
-    excluded = any(token in text for token in EXCLUDED_TOKENS)
-    has_flair_name = any(token in text for token in FLAIR_TOKENS)
-    has_t1_name = any(token in text for token in T1_TOKENS)
-    t1_flair = " t1 flair " in text or " t1flair " in text
+    text = compact_text(*values)
+    excluded_text = normalized_text(*values)
+    excluded = any(token in excluded_text for token in EXCLUDED_TOKENS)
+    has_flair_name = any(keyword in text for keyword in FLAIR_KEYWORDS)
+    has_t1_name = any(keyword in text for keyword in T1_KEYWORDS)
 
     if record.modality.upper() != "MR" or excluded:
         record.candidate_type = "other"
         record.classification_confidence = "high" if excluded else "low"
-    elif has_flair_name and not t1_flair:
+    elif has_flair_name:
         record.candidate_type = "flair"
         record.classification_confidence = "high"
     elif _plausible_flair_timing(record) and not has_t1_name:
         record.candidate_type = "flair"
         record.classification_confidence = "medium"
-    elif has_t1_name and not has_flair_name:
+    elif has_t1_name:
         record.candidate_type = "t1"
         record.classification_confidence = "high"
     else:

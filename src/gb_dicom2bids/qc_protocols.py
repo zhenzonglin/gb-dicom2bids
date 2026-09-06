@@ -140,6 +140,11 @@ class ProtocolIndex:
             self.subject_group[subject] = gid
         self._inventory_digest: str | None = None
         self._digest_lock = threading.Lock()
+        self.identification = None
+        if (self.root / "identification.json").exists():
+            from .qc_identify import Identification
+
+            self.identification = Identification(self)
 
     @property
     def inventory_digest(self) -> str:
@@ -149,12 +154,16 @@ class ProtocolIndex:
                 self._inventory_digest = fingerprint(
                     sorted((uid, record_digest(r)) for uid, r in self.records.items())
                 )
+            if self.identification:
+                return fingerprint([self._inventory_digest, self.identification.state])
             return self._inventory_digest
 
     def rule(self, subject: str) -> dict:
         return self.rules["groups"].get(self.subject_group[subject], {})
 
     def assignment(self, uid: str, rule: dict | None = None) -> dict:
+        if self.identification and rule is None:
+            return self.identification.assignment(uid)
         record = self.records[uid]
         rule = self.rule(record.subject_id) if rule is None else rule
         value = rule.get("templates", {}).get(self.templates[uid]["id"], {})

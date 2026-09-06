@@ -162,6 +162,9 @@ def _worker(job: dict) -> dict:
 def run_features(
     index: ProtocolIndex, workers: int = 8, resume: bool = True, retry_failed: bool = False
 ) -> dict:
+    from .qc_identify import require_quality
+
+    require_quality(index.root)
     if not 1 <= workers <= 64:
         raise ValueError("feature workers must be between 1 and 64")
     jobs = []
@@ -217,6 +220,7 @@ def run_features(
             file_lock(index.root / ".features.lock"),
             ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as pool,
         ):
+            require_quality(index.root)
             pending, cursor = {}, 0
             while cursor < len(jobs) or pending:
                 snapshot = resource_snapshot(index.config)

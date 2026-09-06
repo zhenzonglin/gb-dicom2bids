@@ -5,7 +5,7 @@ Date: 2026-09-06. Author: zhenzong. Branch: `feat/protocol-assisted-qc`.
 ## Verified locally
 
 - Python 3.11; Ruff and compilation passed.
-- 107 repository tests passed. The existing unrelated local monitor tests are not part of this
+- 118 repository tests passed. The existing unrelated local monitor tests are not part of this
   patch. Warnings concern deprecated pydicom fixture flags, not failed checks.
 - Eleven new synthetic tests cover center/name/geometry grouping, numeric name preservation,
   preview conflicts, rule withdrawal, real duplicate ties, native blur and local bad slices,
@@ -44,7 +44,24 @@ test injected a list API failure and verified that retry restored the patient li
 images. An unresolved request reports a timeout after 60 seconds instead of an unexplained
 empty panel. Workstation-specific failures still require the displayed error to diagnose.
 
-## Not yet verified on the workstation
+## Sequence-first workflow repair
+
+The default `catalog` now creates a metadata-only, two-stage identification workflow. T1 and
+FLAIR have separate center/name groups; unrelated sequences do not split groups. Layer counts
+and voxel dimensions remain quality-domain metadata, not mandatory sequence-name grouping keys.
+Generic names without protocol meaning remain individual. Existing whole-combination rules and
+manual QC files are retained, but the new workflow does not silently adopt old group rules.
+
+Eleven additional synthetic tests cover independent modality groups, extra DWI, geometry variants,
+optional missed-sequence corrections, no copied quality, source/manual checksum preservation,
+per-patient absence, repeat scans, version/preview protection, manual conflicts, generic names,
+metadata-only cataloguing, changed inventories and backend quality-stage gates.
+
+The separate browser check exercises optional correction, group-wide publication, disabled quality
+controls, explicit stage transition, persisted human quality and reopening identification. Only
+synthetic images were used. The pending counts are not measurements of the workstation cohort.
+
+## Workstation validation still required
 
 No patient data, manual labels or trained model were available to the local verification run.
 Actual label counts, rule coverage, false-acceptance rate and reduction in manual review are

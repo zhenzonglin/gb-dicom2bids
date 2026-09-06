@@ -68,7 +68,7 @@ def handler_class(service: ReviewService, token: str):
                         .replace("__QC_TOKEN__", token)
                     )
                     self.send(200, html.encode(), "text/html; charset=utf-8")
-                elif url.path in {"/app.js", "/assist.js", "/style.css"}:
+                elif url.path in {"/app.js", "/assist.js", "/identify.js", "/style.css"}:
                     self.send(
                         200,
                         (assets / url.path[1:]).read_bytes(),
@@ -78,6 +78,21 @@ def handler_class(service: ReviewService, token: str):
                     self.json_response(200, service.list_subjects(query))
                 elif url.path == "/api/subject":
                     self.json_response(200, service.subject(query.get("id", "")))
+                elif url.path == "/api/identify":
+                    if not (service.root / "assist/identification.json").exists():
+                        self.json_response(200, {"enabled": False})
+                    else:
+                        identify = service.assistance().identification
+                        self.json_response(
+                            200,
+                            {
+                                "enabled": True,
+                                **identify.summary(),
+                                "group": identify.group(query["group"])
+                                if query.get("group")
+                                else None,
+                            },
+                        )
                 elif url.path == "/api/assist":
                     from .runtime import read_json
 
@@ -153,6 +168,27 @@ def handler_class(service: ReviewService, token: str):
                         200, service.save(str(body.get("subject", "")), body.get("decision", {}))
                     )
                 elif self.path in {
+                    "/api/identify/preview",
+                    "/api/identify/publish",
+                    "/api/identify/transition",
+                }:
+                    with (
+                        writer_lock(service.config),
+                        file_lock(service.root / ".decisions.lock"),
+                        file_lock(service.root / "assist/.assist.lock"),
+                        file_lock(service.root / "assist/.features.lock"),
+                    ):
+                        assert_pipeline_idle(service.config)
+                        identify = service.assistance().identification
+                        if not identify:
+                            raise ValueError("请先运行 qc_assist.py catalog")
+                        operation = self.path.rsplit("/", 1)[-1]
+                        result = getattr(identify, operation)(body)
+                        result.pop("state", None)
+                        if operation != "preview":
+                            service.write_accepted()
+                    self.json_response(200, result)
+                elif self.path in {
                     "/api/assist/preview",
                     "/api/assist/publish",
                     "/api/assist/revoke",
@@ -164,6 +200,8 @@ def handler_class(service: ReviewService, token: str):
                     ):
                         assert_pipeline_idle(service.config)
                         index = service.assistance()
+                        if index.identification:
+                            raise ValueError("两阶段流程请使用序列识别入口，不再发布旧组合规则")
                         operation = self.path.rsplit("/", 1)[-1]
                         result = getattr(index, operation)(body)
                         if operation != "preview":

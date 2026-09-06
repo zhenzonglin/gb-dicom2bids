@@ -31,6 +31,16 @@ def _stats(path: Path) -> list[int]:
 def evidence_valid(root: Path, proof: dict) -> bool:
     """Cheap conservative gate; installation additionally verifies full NIfTI/JSON hashes."""
     try:
+        identification = read_json(root / "assist/identification.json")
+        if identification:
+            from .qc_identify import require_quality
+
+            require_quality(root / "assist")
+        if identification and (
+            identification.get("phase") != "quality"
+            or proof.get("identification_revision") != identification.get("revision")
+        ):
+            return False
         rules = read_json(root / "assist/rules.json")
         if proof["rules_revision"] != rules.get("revision", 0):
             return False
@@ -115,6 +125,9 @@ def effective_decision(root: Path, subject: str) -> dict:
 
 
 def propose(index: ProtocolIndex) -> dict:
+    from .qc_identify import require_quality
+
+    require_quality(index.root)
     rows = feature_rows(index)
     # Uncalibrated rankings stay within modality/template; they never authorize images.
     strata = defaultdict(list)
@@ -143,10 +156,21 @@ def propose(index: ProtocolIndex) -> dict:
     conflicted = {
         g for g, subjects in index.groups.items() if index.conflicts(g, index.rule(subjects[0]))
     }
+    identification_pending = (
+        {
+            (s, g["modality"])
+            for g in index.identification.catalogue()["groups"]
+            for s in g["pending_subjects"]
+        }
+        if index.identification
+        else set()
+    )
 
     def protocol_known(row):
         record = index.records[row["id"]]
         subject, modality = row["subject"], row["modality"]
+        if index.identification:
+            return (subject, modality) not in identification_pending
         return index.subject_group[subject] not in conflicted and (
             bool(index.rule(subject))
             or (
@@ -261,6 +285,9 @@ def propose(index: ProtocolIndex) -> dict:
                                 replace(record, candidate_type=modality),
                             )
                             proof = {
+                                "identification_revision": index.identification.state["revision"]
+                                if index.identification
+                                else None,
                                 "candidate_id": uid,
                                 "modality": modality,
                                 "domain": row["domain"],
@@ -382,6 +409,7 @@ def status(root: Path) -> dict:
     features = read_json(root / "status.json")
     triage = read_json(root / "triage.json")
     catalogue = read_json(root / "catalogue.json")
+    identification = read_json(root / "identification_catalogue.json")
     validation = {}
     for modality in ("t1", "flair"):
         model = load_model(root, modality)
@@ -393,7 +421,8 @@ def status(root: Path) -> dict:
         "features": features,
         "queues": triage.get("counts", {}),
         "queues_at": triage.get("at"),
-        "protocol_groups": len(catalogue.get("groups", [])),
+        "protocol_groups": len((identification or catalogue).get("groups", [])),
+        "identification": {k: v for k, v in identification.items() if k != "groups"},
         "validation": validation,
     }
 
@@ -401,7 +430,16 @@ def status(root: Path) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=["catalog", "features", "calibrate", "propose", "status"]
+        "command",
+        choices=[
+            "catalog",
+            "features",
+            "calibrate",
+            "propose",
+            "status",
+            "finish-identification",
+            "reopen-identification",
+        ],
     )
     parser.add_argument("--config", type=Path, default=Path("config/config.nifti.local.yaml"))
     parser.add_argument("--workers", type=int, default=8)
@@ -416,6 +454,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         root = config.paths.audit_root / "visual_qc/assist"
+        if args.command in {"features", "calibrate", "propose"}:
+            from .qc_identify import require_quality
+
+            require_quality(root)
         if args.command == "status":
             while True:
                 print(json.dumps(status(root), ensure_ascii=False, indent=2), flush=True)
@@ -431,12 +473,17 @@ def main(argv: list[str] | None = None) -> int:
                 writer_lock(config),
                 file_lock(root.parent / ".decisions.lock"),
                 file_lock(root / ".assist.lock"),
+                file_lock(root / ".features.lock"),
             ):
                 assert_pipeline_idle(config)
                 index = ProtocolIndex(config)
                 if args.command == "catalog":
-                    catalogue = index.catalogue()
-                    atomic_write_json(root / "catalogue.json", catalogue)
+                    from .qc_identify import Identification
+
+                    identification = index.identification or Identification(index)
+                    index.identification = identification
+                    catalogue = identification.enable()
+                    atomic_write_json(root / "identification_catalogue.json", catalogue)
                     labels = Counter()
                     for s in index.subjects:
                         labels.update(
@@ -448,7 +495,19 @@ def main(argv: list[str] | None = None) -> int:
                         "groups": len(catalogue["groups"]),
                         "needs_protocol": sum(g["needs_protocol"] for g in catalogue["groups"]),
                         "human_ratings": dict(labels),
+                        "identification": identification.summary(),
                     }
+                elif args.command in {"finish-identification", "reopen-identification"}:
+                    if not index.identification:
+                        raise ValueError("run catalog first")
+                    result = index.identification.transition(
+                        {
+                            "revision": index.identification.state["revision"],
+                            "phase": "quality"
+                            if args.command == "finish-identification"
+                            else "identification",
+                        }
+                    )
                 elif args.command == "calibrate":
                     result = calibrate(index, new_model=args.new_model, audit_size=args.audit_size)
                 else:

@@ -83,8 +83,10 @@ function addAssistQuality(quality,candidate){
 }
 
 async function refreshAssistProgress(){
+  if(identifying()){$('#assist-progress').textContent='当前仅识别序列；质量检查尚未开始。';return;}
   try{
     const status=await api('/api/assist/status'), f=status.features, q=status.queues;
+    if(workflow?.enabled&&!status.queues_at){$('#assist-progress').textContent='尚未运行自动质量筛查；可进行人工质量检查。';return;}
     $('#assist-progress').textContent=`特征 ${f.completed||0}/${f.total||0} · 失败 ${f.failed||0} · 待复核 ${q.quality_review||0} · 抽查 ${q.audit||0} · 自动通过 ${q.auto_pass||0}`;
   }catch(error){$('#assist-progress').textContent=error.message;}
 }

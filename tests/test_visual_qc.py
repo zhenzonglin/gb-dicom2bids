@@ -598,7 +598,9 @@ def test_http_token_origin_version_and_local_assets(review):
         html = request("/").read()
         script = request("/app.js").read()
         assert b"test-token" in html
-        assert b'id="others" type="checkbox" checked' in html
+        assert b'id="others" type="checkbox"' in html
+        assert b'id="others" type="checkbox" checked' not in html
+        assert request("/identify.js").status == 200
         assert b'id="episode"' not in html
         assert "按文件夹名独立选择序列".encode() in html
         assert "原始NIfTI第三维体素切片".encode() in html

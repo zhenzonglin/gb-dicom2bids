@@ -26,6 +26,9 @@ or other before the quality and final-candidate decisions are saved.
 The optional [protocol-assisted QC patch](docs/protocol_assisted_qc.md) adds center/template
 classification rules, native-slice quality features, patient-separated quality models and
 independent acceptance audits. Start with `python qc_assist.py catalog --config <local-config>`.
+The workflow now separates sequence identification from image quality: identify T1/FLAIR
+protocols first, then explicitly enter quality review. Other sequences are optional correction
+sources, not required grouping fields. Existing human QC is preserved.
 Rules never copy quality labels. Automatic acceptance is disabled until its independent audit
 passes; manual decisions take precedence and BIDS installation still requires explicit apply.
 

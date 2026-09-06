@@ -134,6 +134,9 @@ def score(model: dict, rows: list[dict]) -> np.ndarray:
 
 
 def calibrate(index: ProtocolIndex, *, new_model: bool = False, audit_size: int = 59) -> dict:
+    from .qc_identify import require_quality
+
+    require_quality(index.root)
     if not 59 <= audit_size <= 10000:
         raise ValueError("audit size must be between 59 and 10000 independent patients")
     try:

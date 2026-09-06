@@ -116,7 +116,15 @@ class ReviewService:
                 "groups": {},
             }
             self._assist.decisions = self.decisions
+            if self._assist.identification:
+                self._assist.identification.reload()
             return self._assist
+
+    def has_assistance(self):
+        return any(
+            (self.root / "assist" / name).exists()
+            for name in ("catalogue.json", "identification.json")
+        )
 
     def close(self) -> None:
         self.stop.set()
@@ -167,7 +175,16 @@ class ReviewService:
     def list_subjects(self, filters: dict[str, str]) -> dict[str, Any]:
         result = []
         query = filters.get("q", "").lower()
-        assist = self.assistance() if (self.root / "assist/catalogue.json").exists() else None
+        assist = self.assistance() if self.has_assistance() else None
+        if (
+            assist
+            and assist.identification
+            and (
+                assist.identification.state["phase"] == "identification"
+                or filters.get("queue") in {"protocol", "identified"}
+            )
+        ):
+            return assist.identification.list_subjects(filters)
         triage = read_json(self.root / "assist/triage.json") if assist else {}
         allowed = None
         if filters.get("queue") == "protocol":
@@ -259,13 +276,16 @@ class ReviewService:
             raise ValueError("unknown subject")
         decision = read_decision(self.root, subject)
         self.decisions[subject] = decision
-        assist = self.assistance() if (self.root / "assist/catalogue.json").exists() else None
+        assist = self.assistance() if self.has_assistance() else None
         triage = (
             {r["id"]: r for r in read_json(self.root / "assist/triage.json").get("rows", [])}
             if assist
             else {}
         )
         candidates = []
+        decision = dict(
+            decision, candidates={u: dict(r) for u, r in decision.get("candidates", {}).items()}
+        )
         for uid in self.by_subject[subject]:
             record = self.records[uid]
             row = self.selection.get((subject, record.study_uid_hash, record.series_uid_hash))
@@ -274,6 +294,12 @@ class ReviewService:
                 item["candidate_type"] = assist.assignment(uid)["modality"]
                 item["template_id"] = assist.templates[uid]["id"]
                 item["assist"] = triage.get(uid, {})
+                if assist.identification:
+                    item["family_id"] = assist.identification.families[uid]
+                    from .qc_protocols import explicit
+
+                    if uid in decision["candidates"] and not explicit(decision["candidates"][uid]):
+                        decision["candidates"][uid]["modality"] = item["candidate_type"]
             item.update(
                 {
                     "id": uid,
@@ -289,6 +315,12 @@ class ReviewService:
             "decision": decision,
             "candidates": candidates,
             "protocol_group": assist.subject_group[subject] if assist else None,
+            "identification_groups": assist.identification.subject_groups(subject)
+            if assist and assist.identification
+            else [],
+            "sequence_choices": {m: v["choice"] for m, v in assist.choices(subject).items()}
+            if assist and assist.identification
+            else {},
         }
 
     def artifact(self, uid: str, *, deep: bool = False) -> dict[str, Any]:
@@ -516,7 +548,7 @@ class ReviewService:
         if not isinstance(ratings, dict) or not isinstance(groups, dict):
             raise ValueError("invalid decision structure")
         prior_ratings = read_decision(self.root, subject).get("candidates", {})
-        assist = self.assistance() if (self.root / "assist/catalogue.json").exists() else None
+        assist = self.assistance() if self.has_assistance() else None
         groups = {"t1": {}, "flair": {}, **groups}
         for uid, rating in ratings.items():
             record = self.require_uid(uid)
@@ -543,6 +575,8 @@ class ReviewService:
             }:
                 raise ValueError("invalid quality or modality")
             rule_modality = assist.assignment(uid)["modality"] if assist else record.candidate_type
+            if assist and assist.identification and modality != rule_modality:
+                raise ValueError("序列归属需要修改时，请先返回序列识别阶段")
             if (
                 quality == "fail" or modality not in {record.candidate_type, rule_modality}
             ) and not reason:
@@ -620,15 +654,20 @@ class ReviewService:
         return clean
 
     def save(self, subject: str, raw: dict[str, Any]) -> dict[str, Any]:
+        from .qc_identify import require_quality
+
         with file_lock(self.root / ".decisions.lock"):
+            require_quality(self.root / "assist")
             clean = self.validate_decision(subject, raw)
             updated = save_decision(self.root, subject, clean)
             self.decisions[subject] = updated
-            if (self.root / "assist/catalogue.json").exists():
+            if self.has_assistance():
                 from .qc_assist import feedback
 
                 with file_lock(self.root / "assist/.assist.lock"):
                     feedback(self.assistance(), subject)
+                    if self._assist.identification:
+                        self._assist.identification.invalidate()
             self.write_accepted()
             return updated
 
@@ -679,10 +718,14 @@ class ReviewService:
         return rows
 
     def apply(self, *, dry_run: bool = True) -> list[dict[str, Any]]:
+        from .qc_identify import require_quality
+
+        require_quality(self.root / "assist")
         from .convert import _install_selected, _validate_converted_pair, _write_diff
 
         actions = []
         with writer_lock(self.config), file_lock(self.root / ".decisions.lock"):
+            require_quality(self.root / "assist")
             assert_pipeline_idle(self.config)
             seed = read_json(self.config.paths.audit_root / "staging_seed.json")
             if self.config.conversion.seed_from_existing_bids and seed.get("status") != "completed":

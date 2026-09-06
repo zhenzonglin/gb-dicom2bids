@@ -31,18 +31,18 @@ def check(url: str, output: Path, channel: str | None):
         expect(page.locator(".view-caption").first).to_contain_text("原始体素切片（第三维）")
         expect(page.locator("#episode")).to_have_count(0)
         expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
-        expect(
-            page.locator(".pane-head select").first.locator("option:checked")
-        ).to_have_text(re.compile(r"^Synthetic T1 axial · T1"))
-        expect(
-            page.locator(".pane-head select").nth(1).locator("option:checked")
-        ).to_have_text(re.compile(r"^Synthetic FLAIR · FLAIR"))
-        expect(page.locator(".quality select").first.locator("option:checked")).to_have_text(
-            "指定为 T1"
+        expect(page.locator(".pane-head select").first.locator("option:checked")).to_have_text(
+            re.compile(r"^Synthetic T1 axial · T1")
         )
-        expect(page.locator(".quality select").nth(1).locator("option:checked")).to_have_text(
-            "指定为 FLAIR"
+        expect(page.locator(".pane-head select").nth(1).locator("option:checked")).to_have_text(
+            re.compile(r"^Synthetic FLAIR · FLAIR")
         )
+        expect(
+            page.locator(".quality select:not(.failure-category)").first.locator("option:checked")
+        ).to_have_text("指定为 T1")
+        expect(
+            page.locator(".quality select:not(.failure-category)").nth(1).locator("option:checked")
+        ).to_have_text("指定为 FLAIR")
         second = context.new_page()
         second.goto(url, wait_until="networkidle")
         # Slice coordinates and CSS transforms must actually change on user interaction.

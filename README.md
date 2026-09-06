@@ -23,6 +23,12 @@ or other before the quality and final-candidate decisions are saved.
 
 ## Optional visual QC patch for v0.2.0
 
+The optional [protocol-assisted QC patch](docs/protocol_assisted_qc.md) adds center/template
+classification rules, native-slice quality features, patient-separated quality models and
+independent acceptance audits. Start with `python qc_assist.py catalog --config <local-config>`.
+Rules never copy quality labels. Automatic acceptance is disabled until its independent audit
+passes; manual decisions take precedence and BIDS installation still requires explicit apply.
+
 Run `python qc_viewer.py` in the existing environment for a loopback-only, offline reviewer.
 Compare all T1/FLAIR candidates, including excluded series, save per-candidate quality and one
 final choice per modality, then explicitly apply with `python qc_viewer.py --apply --dry-run`

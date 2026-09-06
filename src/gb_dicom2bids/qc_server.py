@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .config import load_config
 from .qc_review import ReviewService
-from .qc_state import BusyError, ConflictError, file_lock
+from .qc_state import BusyError, ConflictError, assert_pipeline_idle, file_lock, writer_lock
 
 
 def handler_class(service: ReviewService, token: str):
@@ -68,7 +68,7 @@ def handler_class(service: ReviewService, token: str):
                         .replace("__QC_TOKEN__", token)
                     )
                     self.send(200, html.encode(), "text/html; charset=utf-8")
-                elif url.path in {"/app.js", "/style.css"}:
+                elif url.path in {"/app.js", "/assist.js", "/style.css"}:
                     self.send(
                         200,
                         (assets / url.path[1:]).read_bytes(),
@@ -78,6 +78,34 @@ def handler_class(service: ReviewService, token: str):
                     self.json_response(200, service.list_subjects(query))
                 elif url.path == "/api/subject":
                     self.json_response(200, service.subject(query.get("id", "")))
+                elif url.path == "/api/assist":
+                    from .runtime import read_json
+
+                    index = service.assistance()
+                    catalogue = read_json(index.root / "catalogue.json")
+                    group = next(
+                        (g for g in catalogue.get("groups", []) if g["id"] == query.get("group")),
+                        None,
+                    )
+                    if not group:
+                        raise ValueError("run qc_assist.py catalog before reviewing protocol rules")
+                    rule = index.rules["groups"].get(group["id"], {})
+                    group["published"] = bool(rule)
+                    group["conflicts"] = index.conflicts(group["id"], rule)
+                    for entry in group["templates"]:
+                        entry.update(rule.get("templates", {}).get(entry["id"], {}))
+                    self.json_response(
+                        200,
+                        {
+                            "group": group,
+                            "revision": index.rules["revision"],
+                            "inventory_digest": index.inventory_digest,
+                        },
+                    )
+                elif url.path == "/api/assist/status":
+                    from .qc_assist import status
+
+                    self.json_response(200, status(service.root / "assist"))
                 elif url.path == "/api/candidate":
                     uid = query.get("id", "")
                     service.require_uid(uid)
@@ -124,6 +152,23 @@ def handler_class(service: ReviewService, token: str):
                     self.json_response(
                         200, service.save(str(body.get("subject", "")), body.get("decision", {}))
                     )
+                elif self.path in {
+                    "/api/assist/preview",
+                    "/api/assist/publish",
+                    "/api/assist/revoke",
+                }:
+                    with (
+                        writer_lock(service.config),
+                        file_lock(service.root / ".decisions.lock"),
+                        file_lock(service.root / "assist/.assist.lock"),
+                    ):
+                        assert_pipeline_idle(service.config)
+                        index = service.assistance()
+                        operation = self.path.rsplit("/", 1)[-1]
+                        result = getattr(index, operation)(body)
+                        if operation != "preview":
+                            service.write_accepted()
+                    self.json_response(200, result)
                 else:
                     self.json_response(404, {"error": "not found"})
             except ConflictError as exc:

@@ -35,6 +35,7 @@ from .qc_state import (
     qc_root,
     read_decision,
     record_digest,
+    resolved_decision,
     save_decision,
     writer_lock,
 )
@@ -96,6 +97,21 @@ class ReviewService:
         self.stop = threading.Event()
         self._times: dict[str, dict[str, str]] = {}
         self._verified: dict[str, tuple] = {}
+        self._assist = None
+
+    def assistance(self):
+        from .qc_protocols import ProtocolIndex
+
+        if self._assist is None:
+            self._assist = ProtocolIndex(self.config, list(self.records.values()))
+            for subject, decision in self._assist.decisions.items():
+                self.decisions.setdefault(subject, decision)
+        self._assist.rules = read_json(self.root / "assist/rules.json") or {
+            "revision": 0,
+            "groups": {},
+        }
+        self._assist.decisions = self.decisions
+        return self._assist
 
     def close(self) -> None:
         self.stop.set()
@@ -146,14 +162,41 @@ class ReviewService:
     def list_subjects(self, filters: dict[str, str]) -> dict[str, Any]:
         result = []
         query = filters.get("q", "").lower()
-        for subject, uids in sorted(self.by_subject.items()):
+        assist = self.assistance() if (self.root / "assist/catalogue.json").exists() else None
+        triage = read_json(self.root / "assist/triage.json") if assist else {}
+        allowed = None
+        if filters.get("queue") == "protocol":
+            catalogue = read_json(self.root / "assist/catalogue.json")
+            allowed = {
+                g["representative"]
+                for g in catalogue.get("groups", [])
+                if assist.conflicts(g["id"], assist.rule(g["representative"]))
+                or (g["needs_protocol"] and not assist.rule(g["representative"]))
+            }
+        elif filters.get("queue") in {"quality_review", "audit", "auto_pass"}:
+            allowed = {
+                r["subject"] for r in triage.get("rows", []) if r["queue"] == filters["queue"]
+            }
+        ranks = {}
+        if filters.get("queue") in {"quality_review", "audit"}:
+            for i, row in enumerate(triage.get("rows", [])):
+                if row["queue"] == filters["queue"]:
+                    ranks.setdefault(row["subject"], i)
+        for subject, uids in sorted(
+            self.by_subject.items(), key=lambda item: (ranks.get(item[0], len(ranks)), item[0])
+        ):
+            if allowed is not None and subject not in allowed:
+                continue
             records = [self.records[uid] for uid in uids]
             if filters.get("pilot") == "1" and subject not in self.pilot:
                 continue
             decision = self.decisions.get(subject, {})
             ratings = decision.get("candidates", {})
             counts = Counter(
-                effective_modality(self.records[uid], ratings.get(uid)) for uid in uids
+                assist.assignment(uid)["modality"]
+                if assist
+                else effective_modality(self.records[uid], ratings.get(uid))
+                for uid in uids
             )
             if not counts["t1"] and not counts["flair"] and filters.get("others") != "1":
                 continue
@@ -210,11 +253,22 @@ class ReviewService:
         if subject not in self.by_subject:
             raise ValueError("unknown subject")
         decision = read_decision(self.root, subject)
+        self.decisions[subject] = decision
+        assist = self.assistance() if (self.root / "assist/catalogue.json").exists() else None
+        triage = (
+            {r["id"]: r for r in read_json(self.root / "assist/triage.json").get("rows", [])}
+            if assist
+            else {}
+        )
         candidates = []
         for uid in self.by_subject[subject]:
             record = self.records[uid]
             row = self.selection.get((subject, record.study_uid_hash, record.series_uid_hash))
             item = record.public_dict()
+            if assist:
+                item["candidate_type"] = assist.assignment(uid)["modality"]
+                item["template_id"] = assist.templates[uid]["id"]
+                item["assist"] = triage.get(uid, {})
             item.update(
                 {
                     "id": uid,
@@ -225,7 +279,12 @@ class ReviewService:
                 }
             )
             candidates.append(item)
-        return {"subject": subject, "decision": decision, "candidates": candidates}
+        return {
+            "subject": subject,
+            "decision": decision,
+            "candidates": candidates,
+            "protocol_group": assist.subject_group[subject] if assist else None,
+        }
 
     def artifact(self, uid: str, *, deep: bool = False) -> dict[str, Any]:
         with self.lock:
@@ -427,7 +486,9 @@ class ReviewService:
         error = read_json(self.root / "errors" / f"{uid}.json")
         return (str(error.get("error", "")) + "\n" + "\n".join(result)).strip()
 
-    def validate_decision(self, subject: str, raw: dict[str, Any]) -> dict[str, Any]:
+    def validate_decision(
+        self, subject: str, raw: dict[str, Any], *, assisted: bool = False
+    ) -> dict[str, Any]:
         from .convert import _validate_converted_pair
 
         if subject not in self.by_subject:
@@ -450,6 +511,7 @@ class ReviewService:
         if not isinstance(ratings, dict) or not isinstance(groups, dict):
             raise ValueError("invalid decision structure")
         prior_ratings = read_decision(self.root, subject).get("candidates", {})
+        assist = self.assistance() if (self.root / "assist/catalogue.json").exists() else None
         groups = {"t1": {}, "flair": {}, **groups}
         for uid, rating in ratings.items():
             record = self.require_uid(uid)
@@ -475,7 +537,10 @@ class ReviewService:
                 "other",
             }:
                 raise ValueError("invalid quality or modality")
-            if (quality == "fail" or modality != record.candidate_type) and not reason:
+            rule_modality = assist.assignment(uid)["modality"] if assist else record.candidate_type
+            if (
+                quality == "fail" or modality not in {record.candidate_type, rule_modality}
+            ) and not reason:
                 raise ValueError("failure and reclassification require a reason")
             item = {
                 "quality": quality,
@@ -483,6 +548,17 @@ class ReviewService:
                 "reason": reason,
                 "record_digest": record_digest(record),
             }
+            category = rating.get("failure_category", "")
+            if category:
+                from .qc_learning import QUALITY_REASONS
+
+                if category not in QUALITY_REASONS | {"classification", "not_selected", "unknown"}:
+                    raise ValueError("invalid failure category")
+                item["failure_category"] = category
+            if assisted and rating.get("decision_source") == "automatic":
+                item.update(
+                    {k: rating[k] for k in ("decision_source", "model_version", "rule_revision")}
+                )
             if quality == "pass":
                 artifact = self.artifact(uid, deep=True)
                 if not artifact or artifact["metadata"]["errors"]:
@@ -543,6 +619,11 @@ class ReviewService:
             clean = self.validate_decision(subject, raw)
             updated = save_decision(self.root, subject, clean)
             self.decisions[subject] = updated
+            if (self.root / "assist/catalogue.json").exists():
+                from .qc_assist import feedback
+
+                with file_lock(self.root / "assist/.assist.lock"):
+                    feedback(self.assistance(), subject)
             self.write_accepted()
             return updated
 
@@ -550,7 +631,7 @@ class ReviewService:
         rows = []
         for path in sorted((self.root / "certifications").glob("*.json")):
             cert = read_json(path)
-            decision = read_decision(self.root, cert["subject_id"])
+            decision = resolved_decision(self.root, cert["subject_id"])
             if cert.get("revision") != decision["revision"] or cert.get("status") != "installed":
                 continue
             transaction = (
@@ -571,7 +652,9 @@ class ReviewService:
                     continue
             except OSError:
                 continue
-            rows.append(cert)
+            rows.append(
+                {"decision_source": "manual", "model_version": "", "rule_revision": "", **cert}
+            )
         fields = [
             "subject_id",
             "modality",
@@ -583,6 +666,9 @@ class ReviewService:
             "sidecar_sha256",
             "reviewer",
             "verified_at",
+            "decision_source",
+            "model_version",
+            "rule_revision",
         ]
         _write_tsv(self.root / "accepted_manifest.tsv", rows, fields)
         return rows
@@ -601,11 +687,20 @@ class ReviewService:
             decisions = {}
             saved_subjects = {p.stem for p in (self.root / "subjects").glob("*.json")}
             saved_subjects |= {p.name for p in (self.root / "history").glob("*") if p.is_dir()}
+            saved_subjects |= {p.stem for p in (self.root / "assist/proposals").glob("*.json")}
+            saved_subjects |= {
+                r.get("subject_id")
+                for p in (self.root / "certifications").glob("*.json")
+                if (r := read_json(p)).get("subject_id")
+            }
             for subject in sorted(saved_subjects):
-                decision = read_decision(self.root, subject)
-                if not decision["revision"]:
-                    continue
-                clean = self.validate_decision(subject, decision)
+                decision = resolved_decision(self.root, subject)
+                for modality in ("t1", "flair"):
+                    decision["groups"].setdefault(
+                        modality,
+                        {"choice": None, "none": False, "reason": "automatic_evidence_withdrawn"},
+                    )
+                clean = self.validate_decision(subject, decision, assisted=True)
                 for uid, rating in clean["candidates"].items():
                     prior = decision["candidates"][uid]
                     if rating.get("record_digest") != prior.get("record_digest") or (
@@ -633,6 +728,14 @@ class ReviewService:
                             "candidate_id": group.get("choice"),
                             "revision": decision["revision"],
                         }
+                        rating = decision.get("candidates", {}).get(group.get("choice"), {})
+                        if rating.get("decision_source") == "automatic":
+                            action.update(
+                                {
+                                    k: rating[k]
+                                    for k in ("decision_source", "model_version", "rule_revision")
+                                }
+                            )
                         if not self._already_applied(action, prior_cert):
                             actions.append(action)
             if dry_run:
@@ -691,6 +794,7 @@ class ReviewService:
                     action["candidate_id"],
                 )
                 decision = decisions[subject]
+                reviewer = decision["groups"][modality].get("reviewer", decision["reviewer"])
                 transaction = (
                     self.root / "transactions" / f"{subject}_{modality}_{decision['revision']}.json"
                 )
@@ -734,12 +838,14 @@ class ReviewService:
                             modality,
                             "selected",
                             0,
-                            "visual_qc_approved",
+                            "automatic_qc_approved"
+                            if action.get("decision_source") == "automatic"
+                            else "visual_qc_approved",
                             record.plane,
                             record.source_kind,
                             record.protocol_id,
                             f"sub-{subject}{entity}_{suffix}",
-                            decision["reviewer"],
+                            reviewer,
                             manual,
                         )
                         installed, diffs = _install_selected(
@@ -761,7 +867,7 @@ class ReviewService:
                             sidecar=str(target_json),
                             image_sha256=artifact["image_sha256"],
                             sidecar_sha256=artifact["sidecar_sha256"],
-                            reviewer=decision["reviewer"],
+                            reviewer=reviewer,
                             verified_at=utc_now(),
                             file_stats=[
                                 installed.stat().st_size,
@@ -778,9 +884,7 @@ class ReviewService:
                                 "reason": decision["groups"][modality]["reason"],
                             }
                         ]
-                        cert = dict(
-                            action, status="no_usable_candidate", reviewer=decision["reviewer"]
-                        )
+                        cert = dict(action, status="no_usable_candidate", reviewer=reviewer)
                     for row, rid in rows_by_group[(subject, modality)]:
                         row.candidate_type = modality
                         unresolved = not uid and not decision["groups"][modality].get("none")
@@ -792,8 +896,8 @@ class ReviewService:
                             if rid == uid
                             else ("" if unresolved else "exclude")
                         )
-                        row.reviewer = decision["reviewer"]
-                        row.reason = "visual_qc_approved" if rid == uid else "visual_qc_not_chosen"
+                        row.reviewer = reviewer
+                        row.reason = selected.reason if rid == uid else "visual_qc_not_chosen"
                         row.output_basename = selected.output_basename if rid == uid else ""
                     atomic_write_json(
                         transaction,
@@ -815,9 +919,7 @@ class ReviewService:
             if self.config.nifti_import.enabled:
                 installed_subjects = {
                     path.parent.parent.name.removeprefix("sub-")
-                    for path in self.config.paths.staging_bids_root.glob(
-                        "sub-*/anat/*.nii.gz"
-                    )
+                    for path in self.config.paths.staging_bids_root.glob("sub-*/anat/*.nii.gz")
                 }
                 update_participants(
                     self.config,
@@ -968,14 +1070,12 @@ class ReviewService:
         accepted = {(row["subject_id"], row["modality"]): row for row in self.write_accepted()}
         old = self.config.paths.existing_bids_root
         staging = self.config.paths.staging_bids_root
-        subjects = set(self.by_subject) | {
-            p.name[4:] for p in staging.glob("sub-*") if p.is_dir()
-        }
+        subjects = set(self.by_subject) | {p.name[4:] for p in staging.glob("sub-*") if p.is_dir()}
         if not self.config.nifti_import.enabled:
             subjects |= {p.name[4:] for p in old.glob("sub-*") if p.is_dir()}
         rows = []
         for subject in sorted(subjects):
-            decision = read_decision(self.root, subject)
+            decision = resolved_decision(self.root, subject)
             for modality, suffix in (("t1", "T1w"), ("flair", "FLAIR")):
                 candidates = [
                     uid

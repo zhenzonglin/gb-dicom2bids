@@ -1130,10 +1130,10 @@ def _install_selected(
     if not authorized_choice(config, record, nifti_path):
         raise ConversionError("visual QC approval is required for this exact candidate/image")
     if visual_qc_enabled(config):
-        from .qc_state import candidate_id, digest, qc_root, read_decision
+        from .qc_state import candidate_id, digest, qc_root, resolved_decision
 
         rating = (
-            read_decision(qc_root(config), record.subject_id)
+            resolved_decision(qc_root(config), record.subject_id)
             .get("candidates", {})
             .get(candidate_id(record), {})
         )

@@ -6,6 +6,8 @@
 <header><div class="brand"><b>GB</b><span>影像质控 <small>VISUAL REVIEW / 01</small></span></div><div id="subject-title">选择一位受试者</div><span class="local">● 本机 · 私有</span></header>
 <aside>
 <h2>待阅队列 <span id="total">—</span></h2>
+<select id="assist-queue"><option value="">全部患者</option><option value="protocol">协议待识别 · 每组一例</option><option value="quality_review">质量待复核</option><option value="audit">自动通过抽查</option><option value="auto_pass">已自动通过</option></select>
+<div id="assist-progress" class="hint"></div>
 <input id="search" placeholder="受试者 / 序列名称">
 <div class="filter-pair"><input id="center" placeholder="中心"><input id="protocol" placeholder="协议编号"></div>
 <select id="auto-status"><option value="">全部自动状态</option><option value="selected">自动入选</option><option value="review">待复核</option><option value="excluded">排除</option></select>
@@ -15,10 +17,11 @@
 <p class="hint">自动入选是推荐，不等于人工通过。<br>重扫候选可逐一比较。</p>
 </aside>
 <main><div class="notice">两个展示窗可按文件夹名独立选择序列，再人工指定为T1、FLAIR或其他。每个候选只显示原始NIfTI第三维体素切片，不做轴、冠、矢正交重切或插值，也不据显示方向推断原始采集方向。</div>
+<details id="protocol-panel" hidden><summary>协议识别与批量复用</summary><div id="protocol-content"></div></details>
 <div id="panes"><section class="empty">从左侧选择受试者，开始并排阅片。</section></div>
 <section id="decision-bar" hidden>
 <div class="groups"><div><b>T1最终选择</b><span id="choice-t1">未确定</span><button data-none="t1">无可用T1</button><button data-clear="t1">清除选择</button><input id="none-reason-t1" placeholder="无可用候选的原因"></div>
 <div><b>FLAIR最终选择</b><span id="choice-flair">未确定</span><button data-none="flair">无可用FLAIR</button><button data-clear="flair">清除选择</button><input id="none-reason-flair" placeholder="无可用候选的原因"></div></div>
 <div class="save-row"><label>审核者 <input id="reviewer" value="zhenzong"></label><span id="revision"></span><button id="save">保存决定</button><button id="save-next" class="primary">保存并下一例 →</button></div>
 </section></main><footer><span id="message">等待载入</span><span>仅保存QC决定 · 不在浏览器中修改BIDS</span></footer>
-<script src="/app.js"></script></body></html>
+<script src="/assist.js"></script><script src="/app.js"></script></body></html>

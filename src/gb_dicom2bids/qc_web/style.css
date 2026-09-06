@@ -4,3 +4,5 @@
 /* Fit the source-slice PNG to its viewport while preserving its pixel-matrix aspect ratio. */
 .frame img{width:100%;height:100%}
 .source-view .frame{height:420px}
+#protocol-panel{border:1px solid var(--edge);padding:12px;margin-bottom:12px;background:var(--panel)}
+.protocol-row{display:flex;gap:8px;margin:8px 0;align-items:center}.protocol-row span{flex:1;overflow-wrap:anywhere}.protocol-row input{width:80px}.protocol-reason{width:100%;margin:10px 0}.quality .failure-category{max-width:240px;width:100%;margin-top:8px}

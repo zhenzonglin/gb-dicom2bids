@@ -185,7 +185,7 @@ def authorized_choice(
 ) -> bool:
     if not enabled(config):
         return True
-    decision = read_decision(qc_root(config), record.subject_id)
+    decision = resolved_decision(qc_root(config), record.subject_id)
     uid = candidate_id(record)
     rating = decision.get("candidates", {}).get(uid, {})
     modality = effective_modality(record, rating)
@@ -220,7 +220,7 @@ def applied_choice(config: ProjectConfig, record: SeriesRecord) -> bool:
     """Only already applied decisions may be treated as installed by ordinary resume."""
     if not enabled(config):
         return True
-    decision = read_decision(qc_root(config), record.subject_id)
+    decision = resolved_decision(qc_root(config), record.subject_id)
     cert = read_json(
         qc_root(config) / "certifications" / f"{record.subject_id}_{record.candidate_type}.json"
     )
@@ -240,8 +240,16 @@ def overlay_records(config: ProjectConfig, records: list[SeriesRecord]) -> list[
     for record in records:
         decision = decisions.setdefault(record.subject_id, {})
         if not decision:
-            decision.update(read_decision(qc_root(config), record.subject_id))
+            decision.update(resolved_decision(qc_root(config), record.subject_id))
         rating = decision.get("candidates", {}).get(candidate_id(record), {})
         modality = effective_modality(record, rating)
         result.append(replace(record, candidate_type=modality))
     return result
+
+
+def resolved_decision(root: Path, subject: str) -> dict[str, Any]:
+    if not (root / "assist/proposals" / f"{subject}.json").exists():
+        return read_decision(root, subject)
+    from .qc_assist import effective_decision
+
+    return effective_decision(root, subject)

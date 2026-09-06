@@ -18,6 +18,10 @@ work/
 logs/
 audit/
 visual_qc/
+assist/
+*.joblib
+*.pkl
+*.pickle
 patch_backups/
 .qc-patch.lock
 outputs/

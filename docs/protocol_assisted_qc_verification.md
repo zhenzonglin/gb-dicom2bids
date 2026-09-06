@@ -5,14 +5,16 @@ Date: 2026-09-06. Author: zhenzong. Branch: `feat/protocol-assisted-qc`.
 ## Verified locally
 
 - Python 3.11; Ruff and compilation passed.
-- 106 repository tests passed. The existing unrelated local monitor tests are not part of this
+- 107 repository tests passed. The existing unrelated local monitor tests are not part of this
   patch. Warnings concern deprecated pydicom fixture flags, not failed checks.
-- Ten new synthetic tests cover center/name/geometry grouping, numeric name preservation,
+- Eleven new synthetic tests cover center/name/geometry grouping, numeric name preservation,
   preview conflicts, rule withdrawal, real duplicate ties, native blur and local bad slices,
   ghost-related feature finiteness, oblique and thick-slice geometry, unreadable files, cache
   resume and resource pausing, quality-label eligibility, patient-disjoint frozen models,
   independent audit failure, domain suspension and fresh audit allocation, modality separation,
   corrupt model rejection, manual override, physical installation and recoverable withdrawal.
+  The viewer also has a regression check for sparse manual records, concurrent initialization
+  and deferred full-inventory hashing without changing the publication digest.
 - The 59-patient zero-error audit fixture passes the exact upper-bound criterion; a 58-patient
   zero-error fixture and a 59-patient one-error fixture do not. These are program-logic tests,
   not estimates of clinical performance.
@@ -24,6 +26,23 @@ Date: 2026-09-06. Author: zhenzong. Branch: `feat/protocol-assisted-qc`.
   manual-only proposals, status and an empty dry-run without installing unapproved images.
 - Source package and wheel built; the allow-listed offline patch and SHA256 manifest built.
 - Public release gate passed for staged code, documentation and synthetic tests.
+
+## Patient-list startup repair
+
+The original first list request redundantly read a decision/history path for every participant
+and hashed every inventory record before returning the list. The viewer now reuses its loaded
+human decisions, initializes one shared protocol index, and defers the unchanged full digest
+until it is needed for protocol publication or model checks. No saved decisions are rewritten.
+
+An in-memory benchmark with 20,834 synthetic participants and 333,344 synthetic records reduced
+index initialization from 14.25 to 3.56 seconds on the local development machine. Per-participant
+decision reads during this request decreased from 20,834 to zero. The baseline bypassed disk
+reads; these measurements are not workstation/NFS throughput claims.
+
+The sidebar now reports loading time, visible list errors and a retry button. A local browser
+test injected a list API failure and verified that retry restored the patient list and native
+images. An unresolved request reports a timeout after 60 seconds instead of an unexplained
+empty panel. Workstation-specific failures still require the displayed error to diagnose.
 
 ## Not yet verified on the workstation
 

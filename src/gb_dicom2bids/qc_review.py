@@ -102,16 +102,21 @@ class ReviewService:
     def assistance(self):
         from .qc_protocols import ProtocolIndex
 
-        if self._assist is None:
-            self._assist = ProtocolIndex(self.config, list(self.records.values()))
-            for subject, decision in self._assist.decisions.items():
-                self.decisions.setdefault(subject, decision)
-        self._assist.rules = read_json(self.root / "assist/rules.json") or {
-            "revision": 0,
-            "groups": {},
-        }
-        self._assist.decisions = self.decisions
-        return self._assist
+        with self.lock:
+            if self._assist is None:
+                self._assist = ProtocolIndex(
+                    self.config,
+                    list(self.records.values()),
+                    decisions=self.decisions,
+                )
+                for subject, decision in self._assist.decisions.items():
+                    self.decisions.setdefault(subject, decision)
+            self._assist.rules = read_json(self.root / "assist/rules.json") or {
+                "revision": 0,
+                "groups": {},
+            }
+            self._assist.decisions = self.decisions
+            return self._assist
 
     def close(self) -> None:
         self.stop.set()

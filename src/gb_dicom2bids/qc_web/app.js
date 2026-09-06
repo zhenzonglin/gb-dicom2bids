@@ -2,12 +2,42 @@
 const $ = s => document.querySelector(s);
 const token = $('meta[name="qc-token"]').content;
 let listing = [], current = null, draft = null, dirty = false, offset = 0, generation = 0;
+let listController = null, listGeneration = 0;
 const autoNames = {selected:"自动入选",review:"待复核",excluded:"排除"};
 function message(text, error=false){$('#message').textContent=text;$('#message').className=error?'error':'';}
-async function api(path, data){const response=await fetch(path,{method:data?'POST':'GET',headers:{'X-QC-Token':token,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined});const result=await response.json();if(!response.ok)throw Error(result.error||response.statusText);return result;}
+async function api(path, data, signal){const response=await fetch(path,{method:data?'POST':'GET',signal,headers:{'X-QC-Token':token,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined});const result=await response.json();if(!response.ok)throw Error(result.error||response.statusText);return result;}
 function element(tag, text, className){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;}
 function changed(){dirty=true;message('有未保存决定；保存后才进入私有QC记录。');updateChoices();}
-async function refreshList(){try{const params=new URLSearchParams({q:$('#search').value,queue:$('#assist-queue').value,center:$('#center').value,protocol:$('#protocol').value,status:$('#auto-status').value,reason:$('#reason-filter').value,pilot:$('#pilot').checked?'1':'0',pending:$('#pending').checked?'1':'0',others:$('#others').checked?'1':'0',offset});const data=await api('/api/subjects?'+params);listing=data.subjects;$('#total').textContent=data.total;$('#subjects').replaceChildren();for(const subject of listing){const button=element('button',subject.id,'subject'+(current?.subject===subject.id?' active':''));button.append(element('small',`${subject.center} · T1 ${subject.t1} / FLAIR ${subject.flair} / 其他 ${subject.other}`),element('small',`已评 ${subject.reviewed} · 已定模态 ${subject.resolved}${subject.pilot?' · pilot':''}`));button.onclick=()=>openSubject(subject.id);$('#subjects').append(button);}if(!current&&listing.length)await openSubject(listing[0].id);message('队列已载入；自动推荐不是人工通过。');}catch(error){message(error.message,true);}}
+async function refreshList(){
+  const request=++listGeneration;
+  listController?.abort();
+  const controller=new AbortController();listController=controller;
+  const status=$('#list-status'),retry=$('#retry-list'),started=Date.now();
+  retry.hidden=true;status.className='';
+  const loading=()=>{status.textContent=`正在加载患者列表… ${Math.floor((Date.now()-started)/1000)} 秒（读取已有清单，不重扫图像）`;};
+  loading();const tick=setInterval(loading,1000);
+  const timeout=setTimeout(()=>controller.abort(),60000);
+  try{
+    const params=new URLSearchParams({q:$('#search').value,queue:$('#assist-queue').value,center:$('#center').value,protocol:$('#protocol').value,status:$('#auto-status').value,reason:$('#reason-filter').value,pilot:$('#pilot').checked?'1':'0',pending:$('#pending').checked?'1':'0',others:$('#others').checked?'1':'0',offset});
+    const data=await api('/api/subjects?'+params,undefined,controller.signal);
+    if(request!==listGeneration)return;
+    clearInterval(tick);clearTimeout(timeout);
+    listing=data.subjects;$('#total').textContent=data.total;$('#subjects').replaceChildren();
+    for(const subject of listing){
+      const button=element('button',subject.id,'subject'+(current?.subject===subject.id?' active':''));
+      button.append(element('small',`${subject.center} · T1 ${subject.t1} / FLAIR ${subject.flair} / 其他 ${subject.other}`),element('small',`已评 ${subject.reviewed} · 已定模态 ${subject.resolved}${subject.pilot?' · pilot':''}`));
+      button.onclick=()=>openSubject(subject.id);$('#subjects').append(button);
+    }
+    status.textContent=data.total?`列表已加载 · ${data.total} 名患者`:'当前筛选无匹配患者，请清除筛选条件。';
+    if(!current&&listing.length)await openSubject(listing[0].id);
+    message('队列已载入；自动推荐不是人工通过。');
+  }catch(error){
+    if(request!==listGeneration)return;
+    const detail=error.name==='AbortError'?'请求超过 60 秒；请检查终端错误后重试。':error.message;
+    status.textContent='患者列表加载失败：'+detail;status.className='list-error';retry.hidden=false;
+    message(status.textContent,true);
+  }finally{clearInterval(tick);clearTimeout(timeout);}
+}
 async function openSubject(id){if(dirty&&!confirm('当前决定尚未保存，确定放弃修改？'))return;try{current=await api('/api/subject?id='+encodeURIComponent(id));draft=structuredClone(current.decision);dirty=false;generation++;$('#subject-title').textContent='sub-'+id;$('#decision-bar').hidden=false;$('#reviewer').value=draft.reviewer||'zhenzong';for(const modality of ['t1','flair'])$('#none-reason-'+modality).value=draft.groups[modality]?.reason||'';renderPanes();renderAssistSubject();updateChoices();$('#revision').textContent=`记录版本 ${draft.revision}`;document.querySelectorAll('.subject').forEach(b=>b.classList.toggle('active',b.firstChild.textContent===id));message('可逐层浏览。图像未准备时只准备当前候选，不写入BIDS。');}catch(error){message(error.message,true);}}
 function candidates(){return current.candidates.filter(c=>$('#others').checked||(draft.candidates[c.id]?.modality||c.candidate_type)!=='other').sort((a,b)=>({selected:0,review:1,excluded:2}[a.auto_status]-{selected:0,review:1,excluded:2}[b.auto_status]));}
 function rating(candidate){return draft.candidates[candidate.id]||(draft.candidates[candidate.id]={quality:'unreviewed',modality:candidate.candidate_type,reason:''});}
@@ -99,4 +129,5 @@ function updateChoices(){if(!draft)return;for(const modality of ['t1','flair']){
 async function save(next=false){if(!draft)return;try{draft.reviewer=$('#reviewer').value;for(const modality of ['t1','flair'])if(draft.groups[modality])draft.groups[modality].reason=$('#none-reason-'+modality).value;draft=await api('/api/save',{subject:current.subject,decision:draft});dirty=false;$('#revision').textContent=`记录版本 ${draft.revision}`;message('决定已保存。staging尚未改变；需在终端执行应用。');if(next){const index=listing.findIndex(s=>s.id===current.subject);if(index+1<listing.length)await openSubject(listing[index+1].id);else{offset+=100;current=null;await refreshList();}}}catch(error){message(error.message,true);}}
 let timer;['search','center','protocol','reason-filter'].forEach(id=>$('#'+id).oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{offset=0;refreshList();},350);});['auto-status','pilot','pending'].forEach(id=>$('#'+id).onchange=()=>{offset=0;refreshList();});$('#others').onchange=()=>{offset=0;refreshList();if(current)renderPanes();};$('#prev-page').onclick=()=>{offset=Math.max(0,offset-100);refreshList();};$('#next-page').onclick=()=>{offset+=100;refreshList();};document.querySelectorAll('[data-none]').forEach(button=>button.onclick=()=>{const m=button.dataset.none;draft.groups[m]={choice:null,none:true,reason:$('#none-reason-'+m).value};changed();});document.querySelectorAll('[data-clear]').forEach(button=>button.onclick=()=>{delete draft.groups[button.dataset.clear];changed();});['reviewer','none-reason-t1','none-reason-flair'].forEach(id=>$('#'+id).oninput=changed);$('#save').onclick=()=>save();$('#save-next').onclick=()=>save(true);window.onbeforeunload=event=>{if(dirty){event.preventDefault();event.returnValue='';}};document.addEventListener('keydown',event=>{if(event.ctrlKey&&event.key==='s'){event.preventDefault();save();}});refreshList();
 $('#assist-queue').onchange=()=>{offset=0;refreshList();};
+$('#retry-list').onclick=()=>refreshList();
 refreshAssistProgress();setInterval(refreshAssistProgress,5000);

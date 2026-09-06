@@ -20,7 +20,21 @@ def check(url: str, output: Path, channel: str | None):
             "request",
             lambda r: external.append(r.url) if not r.url.startswith((url, "blob:")) else None,
         )
+        # A list endpoint error must be visible in the sidebar, then recover without reload.
+        page.route(
+            "**/api/subjects?*",
+            lambda route: route.fulfill(
+                status=503,
+                content_type="application/json",
+                body='{"error":"synthetic list failure"}',
+            ),
+        )
         page.goto(url, wait_until="networkidle")
+        expect(page.locator("#list-status")).to_contain_text("synthetic list failure")
+        expect(page.locator("#retry-list")).to_be_visible()
+        page.unroute("**/api/subjects?*")
+        page.locator("#retry-list").click()
+        expect(page.locator("#list-status")).to_contain_text("列表已加载")
         expect(page.locator(".frame img[src]")).to_have_count(2)
         expect(page.locator(".frame img").first).to_have_attribute("alt", "原始体素切片")
         page.locator("#protocol-panel summary").click()
@@ -84,6 +98,7 @@ def check(url: str, output: Path, channel: str | None):
                         "persistence",
                         "rule revoke",
                         "structured failure",
+                        "visible list failure and retry recovery",
                     ],
                 },
                 indent=2,

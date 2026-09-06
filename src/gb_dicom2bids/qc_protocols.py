@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -91,7 +92,13 @@ def explicit(rating: dict | None) -> bool:
 
 
 class ProtocolIndex:
-    def __init__(self, config: ProjectConfig, records: list[SeriesRecord] | None = None):
+    def __init__(
+        self,
+        config: ProjectConfig,
+        records: list[SeriesRecord] | None = None,
+        *,
+        decisions: dict[str, dict[str, Any]] | None = None,
+    ):
         if not config.nifti_import.enabled:
             raise ValueError("QC assistance is available only for preconverted NIfTI")
         self.config = config
@@ -106,7 +113,23 @@ class ProtocolIndex:
         self.subjects: dict[str, list[str]] = defaultdict(list)
         for uid, record in self.records.items():
             self.subjects[record.subject_id].append(uid)
-        self.decisions = {s: read_decision(self.root.parent, s) for s in self.subjects}
+        # The viewer already loaded saved decisions. Avoid probing every unreviewed subject
+        # on a network filesystem during the first /api/subjects request.
+        self.decisions = {
+            s: read_decision(self.root.parent, s)
+            if decisions is None
+            else decisions.get(
+                s,
+                {
+                    "subject_id": s,
+                    "revision": 0,
+                    "reviewer": "zhenzong",
+                    "candidates": {},
+                    "groups": {},
+                },
+            )
+            for s in self.subjects
+        }
         self.rules = read_json(self.root / "rules.json") or {"revision": 0, "groups": {}}
         self.groups: dict[str, list[str]] = defaultdict(list)
         self.subject_group: dict[str, str] = {}
@@ -115,9 +138,18 @@ class ProtocolIndex:
             gid = fingerprint([VERSION, signature])[:24]
             self.groups[gid].append(subject)
             self.subject_group[subject] = gid
-        self.inventory_digest = fingerprint(
-            sorted((uid, record_digest(r)) for uid, r in self.records.items())
-        )
+        self._inventory_digest: str | None = None
+        self._digest_lock = threading.Lock()
+
+    @property
+    def inventory_digest(self) -> str:
+        # Required for publishing rules and model authorization, not for listing patients.
+        with self._digest_lock:
+            if self._inventory_digest is None:
+                self._inventory_digest = fingerprint(
+                    sorted((uid, record_digest(r)) for uid, r in self.records.items())
+                )
+            return self._inventory_digest
 
     def rule(self, subject: str) -> dict:
         return self.rules["groups"].get(self.subject_group[subject], {})

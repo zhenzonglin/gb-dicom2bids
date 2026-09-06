@@ -9,6 +9,7 @@ import pytest
 from conftest import write_nifti
 from test_nifti_import import make_config, make_image
 
+from gb_dicom2bids.models import SeriesRecord
 from gb_dicom2bids.nifti_import import inventory_preconverted
 from gb_dicom2bids.qc_assist import effective_decision, evidence_valid, feedback, propose
 from gb_dicom2bids.qc_features import FEATURE_NAMES, FEATURE_VERSION, extract, run_features
@@ -20,11 +21,12 @@ from gb_dicom2bids.qc_learning import (
     partition,
     upper_error_bound,
 )
-from gb_dicom2bids.qc_protocols import ProtocolIndex, normalize_name, template
+from gb_dicom2bids.qc_protocols import ProtocolIndex, fingerprint, normalize_name, template
 from gb_dicom2bids.qc_review import ReviewService
 from gb_dicom2bids.qc_state import (
     ConflictError,
     authorized_choice,
+    candidate_id,
     digest,
     read_decision,
     record_digest,
@@ -436,3 +438,57 @@ def test_flair_model_does_not_authorize_t1(learning_cohort):
     result = propose(index)
     assert not result["validation"]["flair"]["valid"]
     assert not result["counts"].get("auto_pass")
+
+
+def test_viewer_index_reuses_sparse_decisions_and_defers_full_digest(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import Mock
+
+    import gb_dicom2bids.qc_protocols as protocol_module
+    import gb_dicom2bids.qc_review as review_module
+
+    config = make_config(tmp_path, tmp_path / "source")
+    records = [
+        SeriesRecord(
+            center="synthetic",
+            subject_id=f"phantom{i:04}",
+            study_uid_hash="study",
+            series_uid_hash=f"series{i}",
+            series_description="T1",
+            candidate_type="t1",
+        )
+        for i in range(1000)
+    ]
+    monkeypatch.setattr(review_module, "load_private_records", lambda root: records)
+    monkeypatch.setattr(review_module, "load_selection", lambda path: [])
+    no_reads = Mock(side_effect=AssertionError("must not re-read per-patient QC on list request"))
+    monkeypatch.setattr(protocol_module, "read_decision", no_reads)
+    hashes = Mock(wraps=record_digest)
+    monkeypatch.setattr(protocol_module, "record_digest", hashes)
+    atomic_write_json(config.paths.audit_root / "visual_qc/assist/catalogue.json", {"groups": []})
+    service = ReviewService(config, activate=False)
+    uid = candidate_id(records[0])
+    manual = {
+        "revision": 7,
+        "candidates": {
+            uid: {"quality": "defer", "modality": "flair", "reason": "synthetic correction"}
+        },
+        "groups": {},
+    }
+    service.decisions[records[0].subject_id] = manual
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            indices = list(pool.map(lambda _: service.assistance(), range(2)))
+        assert indices[0] is indices[1]
+        assert indices[0].decisions[records[0].subject_id] is manual
+        listed = service.list_subjects({"others": "1"})
+        assert listed["total"] == 1000 and len(listed["subjects"]) == 100
+        assert listed["subjects"][0]["flair"] == 1
+        assert no_reads.call_count == hashes.call_count == 0
+        # The exact old digest remains mandatory for preview/publish and is cached once.
+        expected = fingerprint(sorted((candidate_id(r), record_digest(r)) for r in records))
+        assert indices[0].inventory_digest == expected
+        assert indices[1].inventory_digest == expected
+        assert hashes.call_count == 1000
+    finally:
+        service.close()

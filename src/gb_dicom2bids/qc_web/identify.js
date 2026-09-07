@@ -100,7 +100,7 @@ async function renderIdentification(){
   const reviewer=element('input');reviewer.value='zhenzong';reviewer.setAttribute('aria-label','序列审核者');content.append(reviewer);
   const reviewList=element('details');reviewList.open=true;
   reviewList.append(element('summary','本轮待确认的序列（勾选表示待定，不参与排除）'));
-  reviewList.append(element('p','待定仅由您手动勾选或取消；预览失败不会自动勾选。已保存的待定选择会恢复。','hint'));
+  reviewList.append(element('p','仅手动勾选项保留待定。点击本轮均不是目标并确认发布后，未勾选项将按同组模板排除，包括预览失败项；不改变质量记录。已保存的待定选择会恢复。','hint'));
   for(const c of current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id))){
     const label=element('label',' '+c.series_description),box=element('input');
     box.type='checkbox';box.dataset.deferUid=c.id;box.checked=identificationDeferred.has(c.id);
@@ -134,9 +134,8 @@ async function renderIdentification(){
       if(action==='negative'){
         const pending=current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id));
         const blocked=new Set(pending.filter(c=>identificationDeferred.has(c.id)).map(c=>c.family_id));
-        const failed=pending.filter(c=>identificationFailures.has(c.id)&&!blocked.has(c.family_id));
-        if(failed.length)throw Error('以下序列预览失败，不能直接批量排除：'+failed.map(c=>c.series_description).join('；')+'。可重试预览，或由您手动勾选待定后提交其余序列。');
         payload.templates={};
+        payload.negative_source_policy='identity_only';
         payload.negative_templates=[...new Set(pending.filter(c=>!blocked.has(c.family_id)).map(c=>c.family_id))];
         payload.deferred_candidates=current.candidates.filter(c=>identificationDeferred.has(c.id)).map(c=>c.id);
         if(!payload.negative_templates.length&&!payload.deferred_candidates.length)throw Error('本轮没有尚待确认的序列。');
@@ -144,7 +143,7 @@ async function renderIdentification(){
       if(action==='revoke'){payload.templates={};payload.revoke_negative=[...revoked];if(!revoked.size)throw Error('请先勾选要撤回的模板。');}
       const result=await api('/api/identify/preview',payload);
       const names=(payload.negative_templates||[]).map(f=>current.candidates.find(c=>c.family_id===f)?.series_description||f);
-      report.textContent=(names.length?'将确认以下模板不是 '+target+'：\n'+names.join('\n')+'\n\n':'')+JSON.stringify(result,null,2);payload.preview_digest=result.preview_digest;
+      report.textContent=(names.length?'将确认以下模板不是 '+target+'（含未勾选的预览失败项；仅序列排除，不判断质量）：\n'+names.join('\n')+'\n\n':'')+JSON.stringify(result,null,2);payload.preview_digest=result.preview_digest;
       publish.disabled=result.conflicts.length>0;
     }catch(error){payload=null;publish.disabled=true;message(error.message,true);}
   }

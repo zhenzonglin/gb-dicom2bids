@@ -192,12 +192,14 @@ def handler_class(service: ReviewService, token: str):
                         if not identify:
                             raise ValueError("请先运行 qc_assist.py catalog")
                         operation = self.path.rsplit("/", 1)[-1]
-                        # Failed preview jobs are not negative identification evidence.
+                        # Only an explicit identity-only decision can include a failed
+                        # preview. Legacy requests retain their readability protection.
                         with service.lock:
                             jobs = list(service.jobs.items())
                         for uid, job in jobs:
                             if (
-                                job.get("state") in {"failed", "interrupted"}
+                                body.get("negative_source_policy") != "identity_only"
+                                and job.get("state") in {"failed", "interrupted"}
                                 and identify.families.get(uid) in body.get("negative_templates", [])
                                 and service.records[uid].subject_id == body.get("subject")
                             ):

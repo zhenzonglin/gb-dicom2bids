@@ -122,9 +122,10 @@ def test_revoke_refresh_and_stale_preview(tmp_path):
         fresh.publish(dict(p, preview_digest=preview["preview_digest"]))
 
 
-def test_scope_never_expands_to_later_subject_and_generic_names_do_not_merge(tmp_path):
+@pytest.mark.parametrize("policy", ["require_readable", "identity_only"])
+def test_scope_never_expands_to_later_subject_and_generic_names_do_not_merge(tmp_path, policy):
     index, identify = make_missing(tmp_path, {"phantom01": ["image"], "phantom02": ["image"]})
-    publish(identify, negative(identify))
+    publish(identify, dict(negative(identify), negative_source_policy=policy))
     assert target_group(identify)["pending_count"] == 1
     make_image(index.config.nifti_import.source_root / "site/phantom03/image/image.nii.gz")
     refreshed_inventory(index)
@@ -229,9 +230,11 @@ def test_failure_does_not_create_defer_and_clearing_saved_defer_does_not_hide_er
         publish(identify, negative(identify))
 
 
-def test_negative_preview_detects_changed_source_before_publish(tmp_path):
+@pytest.mark.parametrize("policy", ["require_readable", "identity_only"])
+def test_negative_preview_detects_changed_source_before_publish(tmp_path, policy):
     index, identify = make_missing(tmp_path)
     p = negative(identify)
+    p["negative_source_policy"] = policy
     preview = identify.preview(p)
     uid = index.subjects[p["subject"]][0]
     source = index.config.nifti_import.source_root / index.records[uid].source_relpaths[0]
@@ -252,6 +255,91 @@ def test_corrupt_image_cannot_be_negative_evidence(tmp_path):
     with pytest.raises((ValueError, OSError), match="读取失败"):
         publish(identify, negative(identify))
     assert not identify.state.get("negative_scopes")
+
+
+def test_explicit_identity_exclusion_includes_failed_templates_and_survives_restart(tmp_path):
+    index, identify = make_missing(tmp_path, {"phantom01": ["T2-A"], "phantom02": ["T2-A"]})
+    errors = {}
+    for subject in index.subjects:
+        uid = index.subjects[subject][0]
+        error = index.root.parent / "errors" / f"{uid}.json"
+        atomic_write_json(error, {"state": "failed", "error": "synthetic unsupported projection"})
+        errors[error] = digest(error)
+    identify = ProtocolIndex(index.config).identification
+    uid = index.subjects["phantom01"][0]
+    source = index.config.nifti_import.source_root / index.records[uid].source_relpaths[0]
+    source.write_bytes(b"synthetic unreadable nifti")
+    original = digest(source)
+    p = negative(identify)
+    p.update(negative_source_policy="identity_only", deferred_candidates=[])
+    preview = identify.preview(p)
+    assert not preview["quality_copied"]
+    assert preview["negative_source_policy"] == "identity_only"
+    assert preview["failed_preview_candidates"] == [uid]
+    assert not identify.state.get("negative_scopes")  # Preview alone does not exclude.
+    identify.publish(dict(p, preview_digest=preview["preview_digest"]))
+    fresh = ProtocolIndex(index.config).identification
+    assert target_group(fresh)["pending_count"] == 0
+    assert target_group(fresh)["auto_skipped_subjects"] == 1
+    assert fresh.summary()["counts"]["flair"]["pending_subjects"] == 2
+    assert all(digest(path) == value for path, value in errors.items())
+    assert digest(source) == original
+    assert all(not read_decision(index.root.parent, s)["groups"] for s in index.subjects)
+    assert all(not read_decision(index.root.parent, s)["candidates"] for s in index.subjects)
+    family = fresh.families[uid]
+    history = sorted((index.root / "identification_history").glob("*.json"))[-1]
+    assert read_json(history)["request"]["negative_source_policy"] == "identity_only"
+    p = payload_for(fresh, "t1")
+    p.update(templates={}, revoke_negative=[family])
+    publish(fresh, p)
+    assert target_group(fresh)["pending_count"] == 2
+
+
+def test_identity_only_respects_manual_defer_and_positive_conflicts(tmp_path):
+    index, identify = make_missing(tmp_path, {"phantom01": ["T2-A"], "phantom02": ["T2-A"]})
+    uid = index.subjects["phantom01"][0]
+    identify.preview_outcome(uid, True)
+    p = negative(identify)
+    p.update(subject="phantom01", negative_source_policy="identity_only", deferred_candidates=[uid])
+    with pytest.raises(ValueError, match="待定"):
+        publish(identify, p)
+    p["negative_templates"] = []
+    publish(identify, p)
+    assert uid in target_group(identify)["deferred_candidates"]
+    p = negative(identify)
+    p.update(negative_source_policy="identity_only", deferred_candidates=[])
+    publish(identify, p)  # Another representative's rule must not erase a saved defer.
+    assert target_group(identify)["pending_subjects"] == ["phantom01"]
+    p = negative(identify)
+    p.update(negative_source_policy="identity_only", deferred_candidates=[])
+    index.decisions["phantom01"]["candidates"][uid] = {"modality": "t1", "quality": "pass"}
+    identify.invalidate()
+    with pytest.raises(ConflictError, match="人工分类冲突"):
+        publish(identify, p)
+
+
+def test_invalid_negative_policy_is_rejected(tmp_path):
+    _, identify = make_missing(tmp_path)
+    p = negative(identify)
+    p["negative_source_policy"] = True
+    with pytest.raises(ValueError, match="policy"):
+        identify.preview(p)
+
+
+def test_identity_only_can_record_unavailable_source_without_quality_or_pixel_read(tmp_path):
+    index, identify = make_missing(tmp_path, {"phantom01": ["T2-A"]})
+    uid = index.subjects["phantom01"][0]
+    source = index.config.nifti_import.source_root / index.records[uid].source_relpaths[0]
+    # Keep synthetic bytes, but make the inventoried path unavailable.
+    backup = source.rename(source.with_name("synthetic-kept.nii.gz"))
+    original = digest(backup)
+    p = dict(negative(identify), negative_source_policy="identity_only")
+    preview = identify.preview(p)
+    assert preview["source_stamps"][uid]["stat_error"] == "FileNotFoundError"
+    identify.publish(dict(p, preview_digest=preview["preview_digest"]))
+    assert target_group(identify)["pending_count"] == 0
+    assert not read_decision(index.root.parent, "phantom01")["candidates"]
+    assert digest(backup) == original
 
 
 def test_inventory_new_template_reopens_previously_skipped_subject(tmp_path):

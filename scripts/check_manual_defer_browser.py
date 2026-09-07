@@ -1,4 +1,4 @@
-"""Live synthetic preview failure must never check or lock human defer controls."""
+"""Failed previews are excluded only on human publication, unless manually deferred."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from gb_dicom2bids.config import load_config
 from gb_dicom2bids.qc_review import ReviewService
 from gb_dicom2bids.qc_server import handler_class
 from gb_dicom2bids.qc_startup import StartupProgress
+from gb_dicom2bids.qc_state import digest
 
 
 def check(output: Path, channel: str | None):
@@ -28,6 +29,7 @@ def check(output: Path, channel: str | None):
         # Simulate an unsupported projection after inventory without any real source data.
         source = config.nifti_import.source_root / "synthetic_site/phantom01/T2-A/image.nii.gz"
         nib.save(nib.Nifti1Image(np.zeros((8, 8, 1), dtype=np.float32), np.eye(4)), source)
+        original = digest(source)
         service = ReviewService(config)
         service.warmup(StartupProgress())
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class(service, "synthetic-token"))
@@ -62,8 +64,14 @@ def check(output: Path, channel: str | None):
                 expect(box).not_to_be_checked()
                 expect(box).to_be_enabled()
                 panel.get_by_role("button", name="本轮序列均不是 T1").click()
-                expect(page.locator("#message")).to_contain_text("手动勾选待定")
+                publish = panel.get_by_role("button", name="确认识别并应用同类")
+                expect(publish).to_be_enabled()
+                expect(panel.locator("pre")).to_contain_text("仅序列排除，不判断质量")
+                expect(panel.locator("pre")).to_contain_text(
+                    '"negative_source_policy": "identity_only"'
+                )
                 expect(box).not_to_be_checked()
+                assert not service.assistance().identification.state.get("negative_scopes")
 
                 # Even a fresh preview failure after manual uncheck must not reverse it.
                 box.check()
@@ -82,7 +90,6 @@ def check(output: Path, channel: str | None):
                 # Publish a deliberate defer; only this saved decision restores the check.
                 box.check()
                 panel.get_by_role("button", name="本轮序列均不是 T1").click()
-                publish = panel.get_by_role("button", name="确认识别并应用同类")
                 expect(publish).to_be_enabled()
                 publish.click()
                 expect(page.locator("#subject-title")).to_have_text("sub-phantom02")
@@ -106,6 +113,22 @@ def check(output: Path, channel: str | None):
                 expect(box).not_to_be_checked()
                 expect(box).to_be_enabled()
                 page.screenshot(path=str(output / "manual-only-defer.png"), full_page=True)
+                error = service.root / "errors" / f"{uid}.json"
+                error_before = digest(error)
+                # Unchecking is not enough; only a fresh preview + publication excludes it.
+                assert service.assistance().identification.summary()["counts"]["t1"][
+                    "pending_subjects"
+                ] == 1
+                panel.get_by_role("button", name="本轮序列均不是 T1").click()
+                expect(publish).to_be_enabled()
+                expect(panel.locator("pre")).to_contain_text("T2-A")
+                publish.click()
+                expect(page.locator("#workflow-status")).to_contain_text("T1 待识别 0 组 / 0 人")
+                page.reload(wait_until="networkidle")
+                expect(page.locator("#workflow-status")).to_contain_text("T1 待识别 0 组 / 0 人")
+                assert digest(error) == error_before
+                assert digest(source) == original
+                page.screenshot(path=str(output / "failed-preview-excluded.png"), full_page=True)
                 assert not errors, errors
                 assert not external, external
                 browser.close()

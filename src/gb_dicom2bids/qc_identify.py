@@ -181,7 +181,7 @@ class Identification:
                 remaining = exclusions.round(subject, modality) if scope else uids
                 negative_done = bool(scope) and not remaining
                 deferred = bool(scope) and bool(
-                    set(uids) & (set(scope.get("deferred", [])) | self.failed_previews)
+                    set(remaining) & (set(scope.get("deferred", [])) | self.failed_previews)
                 )
                 conflicted = any(
                     self.families[u] in scope.get("templates", {})
@@ -384,7 +384,10 @@ class Identification:
         negative_ids = negative_payload.get("negative_templates", [])
         if set(negative_ids) & {f for f, e in edits.items() if e["modality"] != "other"}:
             raise ValueError("同一模板不能同时识别为目标和排除")
-        image_stamps = self.check_negative_sources(subject, negative_ids)
+        source_policy = payload.get("negative_source_policy", "require_readable")
+        if source_policy not in ("require_readable", "identity_only"):
+            raise ValueError("invalid negative source policy")
+        image_stamps = self.check_negative_sources(subject, negative_ids, policy=source_policy)
         exclusions = ExclusionView(self, state)
         negative_affected, negative_conflicts = set(), []
         if negative_action:
@@ -424,6 +427,12 @@ class Identification:
             "pending_groups_after": sum(g["needs_protocol"] for g in after),
             "changed_templates": edits,
             "negative_templates": negative_ids,
+            "negative_source_policy": source_policy,
+            "failed_preview_candidates": sorted(
+                u
+                for u in self.index.subjects[subject]
+                if self.families[u] in negative_ids and u in self.failed_previews
+            ),
             "source_stamps": image_stamps,
             "auto_skipped_subjects_after": sum(g["auto_skipped_subjects"] for g in after),
             "pending_subjects_after": sum(g["pending_count"] for g in after),
@@ -460,20 +469,43 @@ class Identification:
             raise ConflictError("存在人工分类冲突；原人工决定保留，请先核对冲突病例")
         if not str(payload.get("reviewer", "")).strip():
             raise ValueError("请填写审核者")
-        self._save(result["state"], "publish", payload)
+        self._save(
+            result["state"],
+            "publish",
+            dict(
+                payload,
+                negative_source_stamps=result["source_stamps"],
+                negative_failed_previews=result["failed_preview_candidates"],
+            ),
+        )
         return {
             "affected_subjects": result["affected_subjects"],
             "next_group": result["next_group"],
             **self.summary(),
         }
 
-    def check_negative_sources(self, subject: str, families: list[str]) -> dict:
-        """Read only this round's files; catalogue construction never opens images."""
+    def check_negative_sources(
+        self, subject: str, families: list[str], *, policy: str = "require_readable"
+    ) -> dict:
+        """New explicit identity decisions need no voxel read; old rules stay unchanged."""
         stamps = {}
         for uid in self.index.subjects[subject]:
             if self.families[uid] not in families:
                 continue
             path = nifti_source(self.index.config, self.index.records[uid])
+            if policy == "identity_only":
+                # Bind preview/publish to available file metadata, without claiming
+                # the image is readable or changing its failure/quality record.
+                try:
+                    stat = path.stat()
+                    stamps[uid] = [str(path), stat.st_size, stat.st_mtime_ns]
+                except OSError as exc:
+                    stamps[uid] = {
+                        "path": str(path),
+                        "stat_error": type(exc).__name__,
+                        "errno": exc.errno,
+                    }
+                continue
             if uid in self.failed_previews:
                 raise ValueError(f"读取失败，不能排除；请先重试预览: {uid}")
             stat = path.stat()

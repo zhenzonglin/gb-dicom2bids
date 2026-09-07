@@ -35,10 +35,14 @@ class ExclusionView:
     def excluded(self, uid: str, modality: str) -> bool:
         record = self.identify.index.records[uid]
         _, scope = self.scope(record.subject_id, modality)
+        rule = scope.get("templates", {}).get(self.identify.families[uid])
         return (
-            self.identify.families[uid] in scope.get("templates", {})
+            rule is not None
             and uid not in scope.get("deferred", [])
-            and uid not in self.identify.failed_previews
+            and (
+                uid not in self.identify.failed_previews
+                or rule.get("source_policy") == "identity_only"
+            )
             and not self.positive(uid, modality)
         )
 
@@ -89,7 +93,7 @@ class ExclusionView:
             if u in index.records and index.records[u].subject_id == subject
         }
         if blocked & set(negative):
-            raise ValueError("待定或读取失败的模板不能批量排除；请先恢复预览并取消待定")
+            raise ValueError("手动勾选待定的模板不能批量排除；请先取消待定")
         conflicts, affected = [], set()
         members = set(scope["subjects"])
         for family in negative:
@@ -102,7 +106,10 @@ class ExclusionView:
                     conflicts.append(
                         {"subject": owner, "template": family, "reason": "manual_modality_conflict"}
                     )
-            scope["templates"][family] = {"representative": subject}
+            scope["templates"][family] = {
+                "representative": subject,
+                "source_policy": payload.get("negative_source_policy", "require_readable"),
+            }
         for family in revoke:
             del scope["templates"][family]
             affected.update(

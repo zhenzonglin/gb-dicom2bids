@@ -37,8 +37,9 @@ function displayWorkflow(value){
   if($('#assist-queue').selectedOptions[0].disabled)$('#assist-queue').value=identifying()?'protocol':'';
 }
 
-async function loadWorkflow(){
-  displayWorkflow(await api('/api/identify'));
+async function loadWorkflow(signal){
+  const value=await api('/api/identify',undefined,signal);
+  if(!signal?.aborted)displayWorkflow(value);
 }
 
 async function renderIdentification(){

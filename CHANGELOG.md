@@ -2,6 +2,11 @@
 
 ## Protocol-assisted QC branch patch
 
+- Stream legacy private JSON inventories without retaining a second complete decoded list;
+  report startup stages, read bytes and record counts while preparing the identification index.
+- Patient-list initialization has no fixed timeout or CPU/disk utilization gate. Delay auxiliary
+  progress polling until workflow initialization finishes, and prevent overlapping polls.
+- Ignore disconnected browser sockets without retrying an error response on the same connection.
 - Viewer startup prints the local URL without launching a browser; browser launch is opt-in
   with `--open-browser`, and `--no-browser` remains compatible.
 - Removed the required sequence-identification justification; quality-failure reasons remain.

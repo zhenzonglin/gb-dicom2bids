@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from .json_stream import Progress, iter_objects
 from .models import ConversionResult, SelectionRow, SeriesRecord
 
 INVENTORY_FIELDS = list(SeriesRecord("", "", "", "").public_dict().keys())
@@ -47,22 +48,20 @@ def write_inventory(
     temporary.replace(private_path)
     _write_tsv(
         audit_root / "inventory_errors.tsv",
-        (
-            {"source_relpath": path, "status": error_status}
-            for path in unreadable_relpaths
-        ),
+        ({"source_relpath": path, "status": error_status} for path in unreadable_relpaths),
         ["source_relpath", "status"],
     )
     write_protocol_catalog(audit_root / "protocol_catalog.tsv", records)
 
 
-def load_private_records(audit_root: Path) -> list[SeriesRecord]:
+def load_private_records(
+    audit_root: Path, *, progress: Progress | None = None
+) -> list[SeriesRecord]:
     path = audit_root / "series_sources.json"
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        return [SeriesRecord.from_private_dict(item) for item in iter_objects(path, progress)]
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"run inventory first; missing {path}") from exc
-    return [SeriesRecord.from_private_dict(item) for item in raw]
 
 
 def write_protocol_catalog(path: Path, records: list[SeriesRecord]) -> None:

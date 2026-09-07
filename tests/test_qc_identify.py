@@ -67,6 +67,34 @@ def test_independent_modality_groups_ignore_other_sequences_and_geometry(tmp_pat
     assert not list((index.root.parent / "subjects").glob("*.json"))
 
 
+def test_warmup_prepares_group_cache_without_opening_images_or_resource_gates(
+    tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+
+    import gb_dicom2bids.qc_identify as identify_module
+    import gb_dicom2bids.qc_review as review_module
+
+    index, _ = make_index(tmp_path)
+    blocked = Mock(side_effect=AssertionError("startup must not read images or use resource gates"))
+    monkeypatch.setattr(identify_module, "check_image", blocked)
+    monkeypatch.setattr(review_module, "resource_blockers", blocked)
+    before = (index.root / "identification.json").read_bytes()
+    service = ReviewService(index.config, activate=False)
+    try:
+        progress = Mock()
+        service.warmup(progress)
+        identify = service.assistance().identification
+        cached = identify._catalogue
+        assert cached is not None
+        assert service.list_subjects({})["total"] == cached["pending_groups"]
+        assert service.assistance().identification._catalogue is cached
+        assert (index.root / "identification.json").read_bytes() == before
+        blocked.assert_not_called()
+    finally:
+        service.close()
+
+
 def test_optional_other_correction_propagates_without_whole_subject_match(tmp_path):
     index, identify = make_index(tmp_path, missing=True)
     p = payload_for(identify, "flair")

@@ -25,6 +25,7 @@ from .manifest import (
 from .models import SelectionRow
 from .orientation import classify_orientation
 from .qc_images import VolumeCache
+from .qc_startup import StartupProgress
 from .qc_state import (
     ConflictError,
     assert_pipeline_idle,
@@ -51,7 +52,14 @@ from .runtime import (
 
 
 class ReviewService:
-    def __init__(self, config: ProjectConfig, workers: int = 2, *, activate: bool = True) -> None:
+    def __init__(
+        self,
+        config: ProjectConfig,
+        workers: int = 2,
+        *,
+        activate: bool = True,
+        progress: StartupProgress | None = None,
+    ) -> None:
         if not 1 <= workers <= 16:
             raise ValueError("preview workers must be between 1 and 16")
         self.config = config
@@ -64,7 +72,15 @@ class ReviewService:
                     atomic_write_json(
                         self.root / "enabled.json", {"enabled_at": utc_now(), "version": 1}
                     )
-        records = load_private_records(config.paths.audit_root)
+        if progress:
+            progress.stage("读取序列清单 series_sources.json")
+        records = (
+            load_private_records(config.paths.audit_root, progress=progress.inventory)
+            if progress
+            else load_private_records(config.paths.audit_root)
+        )
+        if progress:
+            progress.stage(f"建立患者索引 · {len(records):,} 条序列")
         self.records = {candidate_id(record): record for record in records}
         if len(records) != len(self.records):
             raise ValueError("duplicate candidate identities")
@@ -72,6 +88,8 @@ class ReviewService:
         for uid, record in self.records.items():
             self.by_subject[record.subject_id].append(uid)
         current = config.paths.audit_root / "selection_manifest.tsv"
+        if progress:
+            progress.stage(f"读取选择清单 · {len(self.by_subject):,} 名患者")
         baseline = self.root / "baseline_selection.tsv"
         if activate and not baseline.exists():
             with file_lock(self.root / ".decisions.lock"):
@@ -82,6 +100,8 @@ class ReviewService:
             (row.subject_id, row.study_uid_hash, row.series_uid_hash): row for row in self.baseline
         }
         self.record_keys = {(r.subject_id, r.study_uid_hash, r.series_uid_hash): r for r in records}
+        if progress:
+            progress.stage("读取已有人工 QC 记录（不修改已保存决定）")
         saved_subjects = {p.stem for p in (self.root / "subjects").glob("*.json")}
         saved_subjects |= {p.name for p in (self.root / "history").glob("*") if p.is_dir()}
         self.decisions = {s: read_decision(self.root, s) for s in saved_subjects}
@@ -98,6 +118,17 @@ class ReviewService:
         self._times: dict[str, dict[str, str]] = {}
         self._verified: dict[str, tuple] = {}
         self._assist = None
+
+    def warmup(self, progress: StartupProgress) -> None:
+        """Finish the expensive first list/identification request before printing the URL."""
+        if self.has_assistance():
+            progress.stage("建立协议名称索引（只使用已有清单，不读取源影像）")
+            index = self.assistance()
+            if index.identification:
+                progress.stage("计算 T1/FLAIR 识别分组和已保存排除规则")
+                summary = index.identification.summary()
+                progress.stage(f"识别分组就绪 · {summary['pending_groups']:,} 个待识别组")
+        progress.stage(f"患者索引就绪 · {len(self.by_subject):,} 名患者")
 
     def assistance(self):
         from .qc_protocols import ProtocolIndex

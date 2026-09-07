@@ -9,22 +9,24 @@ async function api(path, data, signal){const response=await fetch(path,{method:d
 function element(tag, text, className){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;}
 function changed(){dirty=true;message('有未保存决定；保存后才进入私有QC记录。');updateChoices();}
 async function refreshList(preferredGroup=null){
-  if(workflow===null){
-    try{await loadWorkflow();}catch(error){$('#list-status').textContent=error.message;$('#retry-list').hidden=false;return;}
-  }
   const request=++listGeneration;
   listController?.abort();
   const controller=new AbortController();listController=controller;
   const status=$('#list-status'),retry=$('#retry-list'),started=Date.now();
   retry.hidden=true;status.className='';
-  const loading=()=>{status.textContent=`正在加载患者列表… ${Math.floor((Date.now()-started)/1000)} 秒（读取已有清单，不重扫图像）`;};
+  let phase=workflow===null?'正在加载序列识别状态':'正在加载患者列表';
+  const loading=()=>{status.textContent=`${phase}… ${Math.floor((Date.now()-started)/1000)} 秒（读取已有清单，不重扫图像；无固定超时）`;};
   loading();const tick=setInterval(loading,1000);
-  const timeout=setTimeout(()=>controller.abort(),60000);
   try{
+    if(workflow===null){
+      await loadWorkflow(controller.signal);
+      if(request!==listGeneration)return;
+      phase='正在加载患者列表';loading();
+    }
     const params=new URLSearchParams({q:$('#search').value,queue:$('#assist-queue').value,center:$('#center').value,protocol:$('#protocol').value,status:$('#auto-status').value,reason:$('#reason-filter').value,pilot:$('#pilot').checked?'1':'0',pending:$('#pending').checked?'1':'0',others:$('#others').checked?'1':'0',offset});
     const data=await api('/api/subjects?'+params,undefined,controller.signal);
     if(request!==listGeneration)return;
-    clearInterval(tick);clearTimeout(timeout);
+    clearInterval(tick);
     listing=data.subjects;$('#total').textContent=data.total;$('#subjects').replaceChildren();
     for(const subject of listing){
       const button=element('button',subject.id,'subject'+(current?.subject===subject.id?' active':''));
@@ -38,10 +40,10 @@ async function refreshList(preferredGroup=null){
     message('队列已载入；自动推荐不是人工通过。');
   }catch(error){
     if(request!==listGeneration)return;
-    const detail=error.name==='AbortError'?'请求超过 60 秒；请检查终端错误后重试。':error.message;
+    const detail=error.name==='AbortError'?'请求已取消，可重新加载。':error.message;
     status.textContent='患者列表加载失败：'+detail;status.className='list-error';retry.hidden=false;
     message(status.textContent,true);
-  }finally{clearInterval(tick);clearTimeout(timeout);}
+  }finally{clearInterval(tick);}
 }
 async function openSubject(id,groupId){if(dirty&&!confirm('当前决定尚未保存，确定放弃修改？'))return;try{current=await api('/api/subject?id='+encodeURIComponent(id));activeIdentificationGroup=groupId||null;identificationShowAll=false;identificationDeferred=new Set();identificationFailures=new Set();draft=structuredClone(current.decision);dirty=false;generation++;$('#subject-title').textContent='sub-'+id;$('#decision-bar').hidden=false;$('#reviewer').value=draft.reviewer||'zhenzong';for(const modality of ['t1','flair'])$('#none-reason-'+modality).value=draft.groups[modality]?.reason||'';renderPanes();if(workflow?.enabled)await renderIdentification();else renderAssistSubject();updateChoices();$('#revision').textContent=`记录版本 ${draft.revision}`;document.querySelectorAll('.subject').forEach(b=>b.classList.toggle('active',b.firstChild.textContent===id));message('可逐层浏览。图像未准备时只准备当前候选，不写入BIDS。');}catch(error){message(error.message,true);}}
 function candidates(){if(identifying())return identificationCandidates();return current.candidates.filter(c=>$('#others').checked||(draft.candidates[c.id]?.modality||c.candidate_type)!=='other').sort((a,b)=>({selected:0,review:1,excluded:2}[a.auto_status]-{selected:0,review:1,excluded:2}[b.auto_status]));}

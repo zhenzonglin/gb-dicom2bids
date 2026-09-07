@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .config import load_config
 from .qc_review import ReviewService
+from .qc_startup import StartupProgress
 from .qc_state import BusyError, ConflictError, assert_pipeline_idle, file_lock, writer_lock
 
 
@@ -23,6 +24,14 @@ def handler_class(service: ReviewService, token: str):
             return
 
         def send(self, status: int, value: bytes, content_type: str) -> None:
+            try:
+                self._send_response(status, value, content_type)
+            except (BrokenPipeError, ConnectionResetError):
+                # A refreshed/closed tab is not a QC failure. Do not write a second
+                # error response to the same disconnected socket.
+                self.close_connection = True
+
+        def _send_response(self, status: int, value: bytes, content_type: str) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(value)))
@@ -257,7 +266,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("port must be between 1024 and 65535")
     service = None
     try:
-        service = ReviewService(load_config(args.config), args.workers, activate=not args.dry_run)
+        with StartupProgress() as progress:
+            service = ReviewService(
+                load_config(args.config),
+                args.workers,
+                activate=not args.dry_run,
+                progress=progress,
+            )
+            if not args.apply:
+                service.warmup(progress)
         if args.apply:
             actions = service.apply(dry_run=args.dry_run)
             print(
@@ -276,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
             url = f"http://127.0.0.1:{args.port}"
             print(
                 f"Visual QC: {url}\n"
+                "Patient index ready. Open this URL manually.\n"
                 "Save decisions here; apply from a separate terminal after review.",
                 flush=True,
             )
@@ -288,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 server.server_close()
         return 0
+    except KeyboardInterrupt:
+        print("Startup interrupted; saved QC decisions are retained.", flush=True)
+        return 130
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"ERROR: {exc}", flush=True)
         return 2

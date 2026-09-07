@@ -235,7 +235,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config/config.local.yaml"))
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--no-browser", action="store_true")
+    browser = parser.add_mutually_exclusive_group()
+    browser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="explicitly open the local browser (default: print URL only)",
+    )
+    browser.add_argument(
+        "--no-browser",
+        dest="open_browser",
+        action="store_false",
+        help="print URL only; retained for compatibility (already the default)",
+    )
+    parser.set_defaults(open_browser=False)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -267,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
                 "Save decisions here; apply from a separate terminal after review.",
                 flush=True,
             )
-            if not args.no_browser:
+            if args.open_browser:
                 webbrowser.open(url)
             try:
                 server.serve_forever(poll_interval=0.5)

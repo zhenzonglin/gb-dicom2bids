@@ -42,6 +42,9 @@ python qc_assist.py catalog --config config/config.nifti.local.yaml
 python qc_viewer.py --config config/config.nifti.local.yaml
 ```
 
+启动后只在终端打印 `http://127.0.0.1:8765`，**不会自动打开浏览器**。请手动访问该地址；
+只有显式追加 `--open-browser` 才调用浏览器。旧的 `--no-browser` 参数继续有效，但已无需追加。
+
 1. 默认进入“序列待识别 · 每组一例”，T1、FLAIR **各自归组**，每组显示影响人数。
 2. 第一阶段不显示质量通过/失败按钮。只确认序列归属、协议优先级，不认证图像质量。
 3. 自动识别错误时，从“纠错备选序列”按原文件夹名选择正确影像，点击“将备选加入

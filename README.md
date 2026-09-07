@@ -36,6 +36,8 @@ Rules never copy quality labels. Automatic acceptance is disabled until its inde
 passes; manual decisions take precedence and BIDS installation still requires explicit apply.
 
 Run `python qc_viewer.py` in the existing environment for a loopback-only, offline reviewer.
+Startup only prints the local URL; it does not launch a browser. Open that URL manually.
+Browser launch requires explicit `--open-browser`; the older `--no-browser` flag remains valid.
 Compare all T1/FLAIR candidates, including excluded series, save per-candidate quality and one
 final choice per modality, then explicitly apply with `python qc_viewer.py --apply --dry-run`
 and `python qc_viewer.py --apply`. No re-inventory or environment rebuild is required.

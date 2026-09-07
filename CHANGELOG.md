@@ -2,6 +2,8 @@
 
 ## Protocol-assisted QC branch patch
 
+- Viewer startup prints the local URL without launching a browser; browser launch is opt-in
+  with `--open-browser`, and `--no-browser` remains compatible.
 - Removed the required sequence-identification justification; quality-failure reasons remain.
 - Added human-confirmed, modality-specific negative templates with frozen group membership,
   iterative novel-sequence representatives, deferred/read-failure protection and reversible exclusions.

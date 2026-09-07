@@ -36,7 +36,7 @@ def check(url: str, output: Path, channel: str | None):
         panel.get_by_role("button", name="将备选加入 T1 识别").click()
         for i, rank in enumerate(panel.get_by_label("协议优先级").all(), start=1):
             rank.fill(str(i))
-        panel.locator(".protocol-reason").fill("synthetic sequence-only confirmation")
+        expect(panel.locator(".protocol-reason")).to_have_count(0)
         panel.get_by_role("button", name="预览同类影响").click()
         expect(panel.locator("pre")).to_contain_text('"affected_subjects": 2')
         panel.get_by_role("button", name="确认识别并应用同类").click()

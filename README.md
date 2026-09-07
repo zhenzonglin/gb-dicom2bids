@@ -29,6 +29,9 @@ independent acceptance audits. Start with `python qc_assist.py catalog --config 
 The workflow now separates sequence identification from image quality: identify T1/FLAIR
 protocols first, then explicitly enter quality review. Other sequences are optional correction
 sources, not required grouping fields. Existing human QC is preserved.
+Sequence identification needs no free-text justification. After a human confirms a round's
+templates are not the target modality, a frozen group reuses that negative evidence and shows
+only new templates. Failed/deferred items remain pending; exclusions can be viewed and revoked.
 Rules never copy quality labels. Automatic acceptance is disabled until its independent audit
 passes; manual decisions take precedence and BIDS installation still requires explicit apply.
 

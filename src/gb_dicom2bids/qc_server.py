@@ -183,8 +183,19 @@ def handler_class(service: ReviewService, token: str):
                         if not identify:
                             raise ValueError("请先运行 qc_assist.py catalog")
                         operation = self.path.rsplit("/", 1)[-1]
+                        # Failed preview jobs are not negative identification evidence.
+                        with service.lock:
+                            jobs = list(service.jobs.items())
+                        for uid, job in jobs:
+                            if (
+                                job.get("state") in {"failed", "interrupted"}
+                                and identify.families.get(uid) in body.get("negative_templates", [])
+                                and service.records[uid].subject_id == body.get("subject")
+                            ):
+                                raise ValueError("当前模板预览失败，请先标记待定或重试预览")
                         result = getattr(identify, operation)(body)
                         result.pop("state", None)
+                        result.pop("source_stamps", None)
                         if operation != "preview":
                             service.write_accepted()
                     self.json_response(200, result)

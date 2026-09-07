@@ -1,6 +1,23 @@
 "use strict";
 let workflow=null, activeIdentificationGroup=null, identificationDraft=null;
+let identificationShowAll=false, identificationDeferred=new Set(), identificationFailures=new Set();
 const identifying=()=>workflow?.enabled&&workflow.phase==='identification';
+
+function identificationCandidates(){
+  const group=current.identification_groups?.find(g=>g.id===activeIdentificationGroup);
+  if(!group||identificationShowAll)return current.candidates;
+  const allowed=new Set(group.new_candidate_ids||current.candidates.map(c=>c.id));
+  return current.candidates.filter(c=>allowed.has(c.id));
+}
+
+function identificationFailure(id){
+  if(!identifying())return;
+  identificationFailures.add(id);identificationDeferred.add(id);
+  document.querySelectorAll('[data-defer-uid]').forEach(box=>{
+    if(box.dataset.deferUid===id){box.checked=true;box.disabled=true;}
+  });
+  document.querySelector('#identify-publish')?.setAttribute('disabled','');
+}
 
 function displayWorkflow(value){
   workflow=value;
@@ -37,9 +54,16 @@ async function renderIdentification(){
   const data=await api('/api/identify?group='+encodeURIComponent(group.id));
   if(activeIdentificationGroup!==group.id)return;
   displayWorkflow(data);group=data.group;
+  const slot=current.identification_groups.findIndex(g=>g.id===group.id);
+  current.identification_groups[slot]=group;
+  identificationDeferred=new Set(group.deferred_candidates||[]);
+  for(const uid of identificationFailures)identificationDeferred.add(uid);
   const target=group.modality.toUpperCase();
   content.append(element('h3',`${target} 序列识别 · 同类 ${group.count} 人 · 待识别 ${group.pending_count} 人`));
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
+  content.append(element('p',`本轮新序列 ${group.new_template_count??0} 种 · 累计排除 ${group.excluded_template_count??0} 种 · 自动跳过 ${group.auto_skipped_subjects??0} 人 · 剩余待识别 ${group.pending_count} 人`));
+  const showAllLabel=element('label',' 查看全部序列（含已排除）'),showAll=element('input');
+  showAll.id='identify-show-all';showAll.type='checkbox';showAll.checked=identificationShowAll;showAllLabel.prepend(showAll);content.append(showAllLabel);
   const entries=new Map(group.templates.map(e=>[e.id,{...e}]));
   const rows=element('div');content.append(rows);
   const drawRows=()=>{
@@ -60,10 +84,13 @@ async function renderIdentification(){
   };
   const optional=element('div',undefined,'protocol-row'),select=element('select');
   select.setAttribute('aria-label','纠错备选序列');
-  for(const c of current.candidates){const option=element('option',c.series_description);option.value=c.id;select.append(option);}
+  function fillOptional(){select.replaceChildren();for(const c of identificationCandidates()){const option=element('option',c.series_description);option.value=c.id;select.append(option);}}
+  fillOptional();
+  showAll.onchange=()=>{identificationShowAll=showAll.checked;$('#others').checked=showAll.checked;fillOptional();renderPanes();};
   const add=element('button',`将备选加入 ${target} 识别`);
   add.onclick=()=>{
     const c=current.candidates.find(c=>c.id===select.value);
+    if(!c)return;
     entries.set(c.family_id,{id:c.family_id,example_name:c.series_description,modality:group.modality,priority:0});
     $('#others').checked=true;drawRows();invalidate();
     const pane=$('#panes .pane');if(pane)showCandidate(pane,c.id);
@@ -71,36 +98,68 @@ async function renderIdentification(){
   optional.append(select,add);content.append(optional);
   const compareLabel=element('label',' 同优先级不同协议留待质量阶段逐幅比较');
   const compare=element('input');compare.type='checkbox';compareLabel.prepend(compare);content.append(compareLabel);
-  const reason=element('input');reason.className='protocol-reason';reason.placeholder='序列识别依据（必填，不是质量意见）';content.append(reason);
   const reviewer=element('input');reviewer.value='zhenzong';reviewer.setAttribute('aria-label','序列审核者');content.append(reviewer);
-  const preview=element('button','预览同类影响'),publish=element('button','确认识别并应用同类'),absent=element('button',`本例未找到 ${target}`);
-  publish.disabled=true;absent.hidden=group.families.length>0;
+  const reviewList=element('details');reviewList.open=true;
+  reviewList.append(element('summary','本轮待确认的序列（勾选表示待定，不参与排除）'));
+  for(const c of current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id))){
+    const label=element('label',' '+c.series_description),box=element('input');
+    box.type='checkbox';box.dataset.deferUid=c.id;box.checked=identificationDeferred.has(c.id);
+    box.disabled=identificationFailures.has(c.id);box.setAttribute('aria-label','待定 '+c.series_description);
+    box.onchange=()=>{if(box.checked)identificationDeferred.add(c.id);else identificationDeferred.delete(c.id);invalidate();};
+    label.prepend(box);const row=element('div');row.append(label);reviewList.append(row);
+  }
+  content.append(reviewList);
+  const preview=element('button','预览同类影响'),publish=element('button','确认识别并应用同类'),absent=element('button',`本轮序列均不是 ${target}`);
+  publish.id='identify-publish';publish.disabled=true;
   content.append(preview,publish,absent);
+  const undo=element('details');undo.append(element('summary','已排除模板 / 撤回排除'));
+  const revoked=new Set();
+  for(const entry of group.negative_templates||[]){
+    const label=element('label',' '+entry.name),box=element('input');box.type='checkbox';
+    box.setAttribute('aria-label','撤回 '+entry.name);
+    box.onchange=()=>{if(box.checked)revoked.add(entry.id);else revoked.delete(entry.id);invalidate();};
+    label.prepend(box);const row=element('div');row.append(label);undo.append(row);
+  }
+  const revoke=element('button','预览撤回排除');revoke.disabled=!(group.negative_templates||[]).length;
+  undo.append(revoke);content.append(undo);
   const report=element('pre');content.append(report);
   let payload=null;
   function invalidate(){payload=null;publish.disabled=true;dirty=true;identificationDraft=true;message('序列规则尚未发布；此操作不保存质量通过。');}
-  reason.oninput=reviewer.oninput=compare.onchange=invalidate;
+  reviewer.oninput=compare.onchange=invalidate;
   const makePayload=()=>({group:group.id,subject:current.subject,revision:data.revision,
-    reviewer:reviewer.value,reason:reason.value,compare_in_quality:compare.checked,
+    reviewer:reviewer.value,compare_in_quality:compare.checked,
     templates:Object.fromEntries([...entries].map(([id,e])=>[id,{modality:e.modality,priority:e.priority}]))});
-  async function doPreview(none=false){
-    try{payload=makePayload();if(none)payload.absent=true;
+  async function doPreview(action='positive'){
+    try{payload=makePayload();
+      if(action==='negative'){
+        const pending=current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id));
+        const blocked=new Set(pending.filter(c=>identificationDeferred.has(c.id)).map(c=>c.family_id));
+        payload.templates={};
+        payload.negative_templates=[...new Set(pending.filter(c=>!blocked.has(c.family_id)).map(c=>c.family_id))];
+        payload.deferred_candidates=current.candidates.filter(c=>identificationDeferred.has(c.id)).map(c=>c.id);
+        if(!payload.negative_templates.length&&!payload.deferred_candidates.length)throw Error('本轮没有尚待确认的序列。');
+      }
+      if(action==='revoke'){payload.templates={};payload.revoke_negative=[...revoked];if(!revoked.size)throw Error('请先勾选要撤回的模板。');}
       const result=await api('/api/identify/preview',payload);
-      report.textContent=JSON.stringify(result,null,2);payload.preview_digest=result.preview_digest;
+      const names=(payload.negative_templates||[]).map(f=>current.candidates.find(c=>c.family_id===f)?.series_description||f);
+      report.textContent=(names.length?'将确认以下模板不是 '+target+'：\n'+names.join('\n')+'\n\n':'')+JSON.stringify(result,null,2);payload.preview_digest=result.preview_digest;
       publish.disabled=result.conflicts.length>0;
     }catch(error){payload=null;publish.disabled=true;message(error.message,true);}
   }
-  preview.onclick=()=>doPreview();absent.onclick=()=>doPreview(true);
+  preview.onclick=()=>doPreview();absent.onclick=()=>doPreview('negative');revoke.onclick=()=>doPreview('revoke');
   publish.onclick=async()=>{
     try{if(!payload)return;const result=await api('/api/identify/publish',payload);
       dirty=false;identificationDraft=null;displayWorkflow({...result,enabled:true});
       current=null;activeIdentificationGroup=null;clearImages($('#panes'));$('#panes').replaceChildren();
       $('#protocol-panel').hidden=true;$('#protocol-content').replaceChildren();
-      offset=0;await loadWorkflow();await refreshList();
+      offset=0;await loadWorkflow();await refreshList(result.next_group);
+      if(result.next_group){const next=await api('/api/identify?group='+encodeURIComponent(result.next_group));
+        if(current?.subject!==next.group.representative||activeIdentificationGroup!==next.group.id)await openSubject(next.group.representative,next.group.id);}
       message(`序列规则已应用至 ${result.affected_subjects} 人；未写入任何质量通过记录。`);
     }catch(error){message(error.message,true);}
   };
   drawRows();
+  renderPanes();
 }
 
 async function transitionStage(){

@@ -15,7 +15,7 @@ from gb_dicom2bids.qc_protocols import ProtocolIndex
 from gb_dicom2bids.runtime import atomic_write_json
 
 
-def make_demo(root: Path) -> Path:
+def make_demo(root: Path, *, negative: bool = False) -> Path:
     root = root.resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError("demo destination must be new or empty")
@@ -38,19 +38,33 @@ def make_demo(root: Path) -> Path:
     x, y, z = np.indices((64, 64, 32), dtype=np.float32)
     radius = ((x - 32) / 23) ** 2 + ((y - 32) / 27) ** 2 + ((z - 16) / 14) ** 2
     data = (radius < 1) * (80 + 20 * np.cos(radius * 24) + 7 * np.sin(x * 0.7))
-    for subject in ("phantom01", "phantom02"):
-        for name in ("eT1W-SE", "T1-repeat", "eFLAIR-longTR-CLEAR", "unknown-contrast"):
+    subjects = ("phantom01", "phantom02", "phantom03") if negative else ("phantom01", "phantom02")
+    for subject in subjects:
+        names = ["eT1W-SE", "T1-repeat", "eFLAIR-longTR-CLEAR", "unknown-contrast"]
+        if negative:
+            names = ["T2-A", "DWI-B", "eFLAIR-longTR-CLEAR"]
+            if subject == "phantom03":
+                names.append("unknown-contrast")
+        for name in names:
             folder = root / "source" / "synthetic_site" / subject / name
             folder.mkdir(parents=True)
             nib.save(nib.Nifti1Image(data, np.diag([2.0, 2.0, 4.0, 1.0])), folder / "image.nii.gz")
     config = load_config(config_path)
     inventory_preconverted(config)
     index = ProtocolIndex(config)
-    atomic_write_json(index.root / "catalogue.json", index.catalogue())
+    if negative:
+        from gb_dicom2bids.qc_identify import Identification
+
+        index.identification = Identification(index)
+        index.identification.enable()
+    else:
+        atomic_write_json(index.root / "catalogue.json", index.catalogue())
     return config_path
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    print(make_demo(parser.parse_args().output))
+    parser.add_argument("--negative", action="store_true")
+    args = parser.parse_args()
+    print(make_demo(args.output, negative=args.negative))

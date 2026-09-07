@@ -184,7 +184,11 @@ class ProtocolIndex:
         values = {uid: self.assignment(uid, rule) for uid in self.subjects[subject]}
         result = {}
         for modality in ("t1", "flair"):
-            candidates = [u for u, a in values.items() if a["modality"] == modality]
+            candidates = [
+                u
+                for u, a in values.items()
+                if a["modality"] == modality and modality not in a.get("excluded_modalities", [])
+            ]
             best = min((values[u]["priority"] for u in candidates), default=100)
             winners = [u for u in candidates if values[u]["priority"] == best]
             result[modality] = {
@@ -326,8 +330,8 @@ class ProtocolIndex:
             str(payload.get("reviewer", "")).strip(),
             str(payload.get("reason", "")).strip(),
         )
-        if not reviewer or not reason:
-            raise ValueError("reviewer and rule reason are required")
+        if not reviewer:
+            raise ValueError("reviewer is required")
         rules = dict(
             self.rules, groups=dict(self.rules["groups"]), revision=self.rules["revision"] + 1
         )

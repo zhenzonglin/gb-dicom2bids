@@ -1,5 +1,13 @@
 # Changelog
 
+## Protocol-assisted QC branch patch
+
+- Removed the required sequence-identification justification; quality-failure reasons remain.
+- Added human-confirmed, modality-specific negative templates with frozen group membership,
+  iterative novel-sequence representatives, deferred/read-failure protection and reversible exclusions.
+- Preserved existing human QC, template identities and source data. Sequence rules never grant quality.
+- Added offline browser checks and synthetic regression tests; real-cohort workload remains unmeasured.
+
 ## v0.2.0
 
 - Added participant-level parallel conversion and directory-level parallel DICOM inventory.

@@ -407,6 +407,7 @@ class ReviewService:
         self.require_uid(uid)
         artifact = self.artifact(uid)
         if artifact:
+            self._preview_outcome(uid, False)
             return {"state": "ready", "metadata": artifact["metadata"], "log": self.log_text(uid)}
         with self.lock:
             if uid in self.jobs and (not retry or self.jobs[uid]["state"] != "failed"):
@@ -422,6 +423,16 @@ class ReviewService:
             self.jobs[uid] = {"state": "queued"}
             self.executor.submit(self._prepare_job, uid)
             return dict(self.jobs[uid])
+
+    def _preview_outcome(self, uid: str, failed: bool) -> None:
+        with self.lock:
+            if self._assist and self._assist.identification:
+                self._assist.identification.preview_outcome(uid, failed)
+            if not failed:
+                path = self.root / "errors" / f"{uid}.json"
+                prior = read_json(path)
+                if prior.get("state") == "failed":
+                    atomic_write_json(path, dict(prior, state="resolved", resolved_at=utc_now()))
 
     def _prepare_job(self, uid: str) -> None:
         from .convert import _convert_one
@@ -469,6 +480,7 @@ class ReviewService:
                 with self.lock:
                     atomic_write_json(self.root / "artifacts" / f"{uid}.json", value)
                 self.jobs[uid] = {"state": "ready"}
+                self._preview_outcome(uid, False)
                 return
             isolated = replace(
                 self.config,
@@ -508,9 +520,11 @@ class ReviewService:
             with self.lock:
                 atomic_write_json(self.root / "artifacts" / f"{uid}.json", value)
             self.jobs[uid] = {"state": "ready"}
+            self._preview_outcome(uid, False)
         except Exception as exc:
             self.jobs[uid] = {"state": "failed", "error": str(exc)}
             atomic_write_json(self.root / "errors" / f"{uid}.json", self.jobs[uid])
+            self._preview_outcome(uid, True)
 
     def log_text(self, uid: str) -> str:
         self.require_uid(uid)

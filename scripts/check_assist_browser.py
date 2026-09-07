@@ -44,7 +44,7 @@ def check(url: str, output: Path, channel: str | None):
         for row in panel.locator(".protocol-row").all():
             rank = "1" if "eT1W-SE" in row.inner_text() else "2"
             row.get_by_label("协议优先级").fill(rank)
-        panel.locator(".protocol-reason").fill("synthetic template preference")
+        expect(panel.locator(".protocol-reason")).to_have_count(0)
         panel.get_by_role("button", name="预览批量影响").click()
         expect(panel.locator("pre")).to_contain_text('"affected_subjects": 2')
         panel.get_by_role("button", name="发布这组规则").click()

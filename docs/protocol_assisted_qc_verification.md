@@ -1,11 +1,11 @@
 # Protocol-assisted QC: verification record
 
-Date: 2026-09-06. Author: zhenzong. Branch: `feat/protocol-assisted-qc`.
+Date: 2026-09-07. Author: zhenzong. Branch: `feat/protocol-assisted-qc`.
 
 ## Verified locally
 
 - Python 3.11; Ruff and compilation passed.
-- 118 repository tests passed. The existing unrelated local monitor tests are not part of this
+- 132 repository tests passed. The existing unrelated local monitor tests are not part of this
   patch. Warnings concern deprecated pydicom fixture flags, not failed checks.
 - Eleven new synthetic tests cover center/name/geometry grouping, numeric name preservation,
   preview conflicts, rule withdrawal, real duplicate ties, native blur and local bad slices,
@@ -60,6 +60,31 @@ metadata-only cataloguing, changed inventories and backend quality-stage gates.
 The separate browser check exercises optional correction, group-wide publication, disabled quality
 controls, explicit stage transition, persisted human quality and reopening identification. Only
 synthetic images were used. The pending counts are not measurements of the workstation cohort.
+
+## Negative-template reuse patch
+
+Fourteen additional synthetic tests verify iterative new-template review, duplicate skipping,
+finding a missed target after a negative round, frozen membership, independent target modalities,
+manual positive protection, generic-name isolation, deferred items, unreadable files, persistent
+preview errors and successful retry, inventory changes, source changes between preview/publication,
+withdrawal, and removal of false-positive rows without silently rejecting unseen optional sequences.
+Prior per-patient absence remains compatible and is not promoted into group-wide evidence.
+
+The 132-test suite passed with 75% total coverage (negative-rule module 93%, identification 89%).
+Ruff, Python compilation, JavaScript syntax checks and CLI smoke checks passed. Source and wheel
+builds passed using the project's normal isolated build; the older local environment's build-only
+dependencies were insufficient for a no-isolation build and were not changed.
+
+Three headless Edge browser suites passed: the new negative-template workflow, existing positive
+identification/quality saving, and the legacy assistance interface. New checks verified removal of
+the reason field, native images, automatic next representative, novel-only and full-list toggles,
+persisted deferral, refresh/resume, withdrawal and no copied quality. There were no JavaScript page
+errors or external asset requests. Browser checks used generated phantoms, never patient images.
+
+The private negative-rule scopes and history are version-checked. Successful retries retain the
+original error text while resolving the error status. Model authorizations remain revision-gated.
+No source images, existing human quality decisions, local configuration or monitor files were
+changed by the patch. Actual cohort savings and workstation runtime have not been measured.
 
 ## Workstation validation still required
 

@@ -33,14 +33,13 @@ async function renderAssistSubject(){
       row.append(modality,priority);content.append(row);
       entries.push({id:entry.id,modality,priority});
     }
-    const reason=element('input');reason.placeholder='规则依据（必填）';reason.className='protocol-reason';content.append(reason);
     const preview=element('button','预览批量影响'),publish=element('button','发布这组规则'),revoke=element('button','撤回这组规则');
     publish.disabled=true;revoke.disabled=!group.published;
     content.append(preview,publish,revoke);
     const report=element('pre');content.append(report);
     let payload=null;
     const makePayload=()=>({group:group.id,revision:data.revision,inventory_digest:data.inventory_digest,
-      reviewer:$('#reviewer').value||'zhenzong',reason:reason.value,
+      reviewer:$('#reviewer').value||'zhenzong',
       templates:Object.fromEntries(entries.map(e=>[e.id,{modality:e.modality.value,priority:Number(e.priority.value)}]))});
     content.addEventListener('input',()=>{payload=null;publish.disabled=true;});
     content.addEventListener('change',()=>{payload=null;publish.disabled=true;});
@@ -86,6 +85,7 @@ async function refreshAssistProgress(){
   if(identifying()){$('#assist-progress').textContent='当前仅识别序列；质量检查尚未开始。';return;}
   try{
     const status=await api('/api/assist/status'), f=status.features, q=status.queues;
+    if(identifying()){$('#assist-progress').textContent='当前仅识别序列；质量检查尚未开始。';return;}
     if(workflow?.enabled&&!status.queues_at){$('#assist-progress').textContent='尚未运行自动质量筛查；可进行人工质量检查。';return;}
     $('#assist-progress').textContent=`特征 ${f.completed||0}/${f.total||0} · 失败 ${f.failed||0} · 待复核 ${q.quality_review||0} · 抽查 ${q.audit||0} · 自动通过 ${q.auto_pass||0}`;
   }catch(error){$('#assist-progress').textContent=error.message;}

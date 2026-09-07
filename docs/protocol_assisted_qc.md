@@ -48,10 +48,11 @@ python qc_viewer.py --config config/config.nifti.local.yaml
    T1/FLAIR 识别”。可勾选“纠错：查看全部序列”逐一预览，但不要求分类其他序列。
 4. 数字越小越优先。只有确属误识别时才移出目标候选；不要把非首选真 T1/FLAIR
    改成其他。同优先级不同协议需明确勾选“留待质量阶段逐幅比较”。
-5. 填写识别依据，点击“预览同类影响”，核对人数与人工冲突，再“确认识别并应用同类”。
+5. 无需填写识别依据。点击“预览同类影响”，核对人数与人工冲突，再“确认识别并应用同类”。
    已有人工决定不覆盖，不将代表病例的质量通过传播给其他患者。
-6. 没有候选时可从备选纠错。确实未找到时，填写依据并点击“本例未找到 T1/FLAIR”，
-   该缺失结论**只作用于当前患者**，不能依据一例推断整个中心缺失，也不记录质量失败。
+6. 没有候选时可从备选纠错。人工确认本轮列出的序列均不是目标后，点击“本轮序列均不是
+   T1/FLAIR”，核对名称和预览人数，再确认发布。同组相同模板自动跳过，下一位代表只显示
+   尚未确认的新模板。自动识别为空不会直接触发排除；不删除文件、不记录质量失败。
 7. 待识别组为零后，点击“序列识别完成，进入质量检查”。系统不会自动开始计算质量。
 
 同类识别依据为中心和规范化协议名称。仅移除明确的日期/MR/序列号前缀，保留
@@ -69,6 +70,50 @@ T1 组不受 FLAIR 组合影响，反之亦然。矩阵、层数、体素变化�
 识别统计保存在私有 `visual_qc/assist/identification_catalogue.json`，包含每个模态的
 `pending_groups`（代表组数）、`pending_subjects`（影响患者数）和重复扫描人数。
 这些不是“待阅影像数”，两个模态患者数也不能直接相加当作独立患者数。
+
+### 同组只看新序列
+
+例如第一人拥有 A/B/C，人工确认三种模板均不是 T1 后，另一位只有 A/B/C 的患者自动
+完成该模态的缺失确认；拥有 A/B/C/D 的下一位只需确认 D。若 D 是 T1，加入 T1 识别并
+发布正向规则；若 D 也不是，继续排除。无需逐个患者点击“未找到”。其他模态仍独立处理。
+
+“不是 T1”和“不是 FLAIR”分别保存，不把真 FLAIR 改成其他。负向规则范围固定为首次
+确认时的本组成员；后来的新患者不自动加入。旧逐患者缺失决定保留，但不追溯扩大成整组规则。
+新增模板会使原先自动跳过的患者重新待识别。源数据读取失败或勾选“待定”的项不会算作
+否定证据；其他可识别病例优先展示，仍未解决的失败/待定项留在队列。重试成功后可取消待定。
+
+“查看全部序列（含已排除）”恢复完整备选列表；“已排除模板 / 撤回排除”可勾选模板，
+预览并发布撤回。相关缺失结论自动重新计算。已有人工正向分类受到保护，冲突模板不能
+发布排除；先核对冲突或撤回错误规则。整个过程不复制代表病例的质量结果。
+
+页面显示本轮新模板数、累计排除模板数、自动跳过人数及剩余人数。总计的新增字段为
+`auto_skipped_subjects` 和 `excluded_templates`；撤回时这些派生计数可能减少。实际减少
+的人工工作量以工作站统计为准，不把剩余患者数直接当作还要逐人阅片的次数。
+
+### 更新和备份识别记录
+
+先保存决定并用 Ctrl+C 停止阅片器，不要在运行中替换代码。在当前项目和当前环境中：
+
+```bash
+audit_root=$(python -c 'from gb_dicom2bids.config import load_config; from pathlib import Path; print(load_config(Path("config/config.nifti.local.yaml")).paths.audit_root)')
+backup_dir=$(mktemp -d "$audit_root/visual_qc/identification-backup.XXXXXX")
+cp -a "$audit_root/visual_qc/assist"/identification* "$backup_dir/"
+printf '识别记录备份：%s\n' "$backup_dir"
+git fetch origin
+git switch feat/protocol-assisted-qc
+git pull --ff-only origin feat/protocol-assisted-qc
+python qc_assist.py catalog --config config/config.nifti.local.yaml
+python qc_viewer.py --config config/config.nifti.local.yaml
+```
+
+已有本地分支时使用上述 `switch`；首次跟踪分支时使用
+`git switch --track origin/feat/protocol-assisted-qc`。拉取存在冲突时停止，不强制覆盖本地修改。
+本次无新增依赖，不重建环境，不运行 inventory 或重新复制 BIDS。`catalog` 只重建清单统计。
+
+私有识别状态新增 `negative_scopes`，旧模板 ID 不变。预览、发布、撤回均检查版本，所有
+确认和撤回保存在识别历史中。更新后的负向规则不被旧代码识别；回退必须先停止阅片器并
+另外备份当前识别记录，再一起恢复升级前代码和上述识别备份。不要仅降级代码后继续归档。
+手工质量记录、候选缓存和源影像不随本次更新重建。
 
 ```bash
 python qc_assist.py status --config config/config.nifti.local.yaml

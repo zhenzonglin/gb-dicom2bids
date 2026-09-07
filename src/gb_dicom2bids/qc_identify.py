@@ -6,7 +6,12 @@ import copy
 import re
 from collections import Counter, defaultdict
 
+from nibabel.filebasedimages import ImageFileError
+
+from .qc_exclusions import ExclusionView
+from .qc_images import check_image
 from .qc_protocols import explicit, fingerprint, normalize_name
+from .qc_protocols import source_path as nifti_source
 from .qc_state import ConflictError, effective_modality
 from .runtime import atomic_write_json, read_json, utc_now
 
@@ -58,6 +63,37 @@ class Identification:
             self.members[family].append(uid)
             self.names[family] = name
         self._catalogue = None
+        self._exclusions = None
+        self._readable = {}
+        # Read only the sparse error directory, never probe every source image.
+        self.failed_previews = {
+            p.stem
+            for p in (self.root.parent / "errors").glob("*.json")
+            if p.stem in self.index.records
+            and read_json(p).get("state") == "failed"
+            and (
+                not (self.root.parent / "artifacts" / p.name).exists()
+                or (self.root.parent / "artifacts" / p.name).stat().st_mtime_ns
+                < p.stat().st_mtime_ns
+            )
+        }
+
+    def preview_outcome(self, uid: str, failed: bool):
+        if (uid in self.failed_previews) == failed:
+            return
+        if failed:
+            self.failed_previews = self.failed_previews | {uid}
+        else:
+            self.failed_previews = self.failed_previews - {uid}
+        self.invalidate()
+
+    def exclusions(self, state=None):
+        state = self.state if state is None else state
+        view = self._exclusions
+        if view is None or view.state is not state:
+            view = ExclusionView(self, state)
+            self._exclusions = view
+        return view
 
     def reload(self):
         state = read_json(state_path(self.root))
@@ -67,6 +103,7 @@ class Identification:
 
     def invalidate(self):
         self._catalogue = None
+        self._exclusions = None
 
     def enable(self):
         self.require_current_inventory()
@@ -99,16 +136,26 @@ class Identification:
             "manual": manual,
             "template_id": self.index.templates[uid]["id"],
             "family_id": self.families[uid],
+            "excluded_modalities": [
+                m for m in ("t1", "flair") if self.exclusions(state).excluded(uid, m)
+            ],
         }
 
     def _groups(self, state):
         groups = {}
+        exclusions = self.exclusions(state)
         for subject, uids in sorted(self.index.subjects.items()):
             center = self.index.records[uids[0]].center
             for modality in ("t1", "flair"):
-                candidates = [u for u in uids if self.assignment(u, state)["modality"] == modality]
+                candidates = [
+                    u
+                    for u in uids
+                    if self.assignment(u, state)["modality"] == modality
+                    and not exclusions.excluded(u, modality)
+                ]
                 families = sorted({self.families[u] for u in candidates})
-                key = fingerprint([VERSION, center, modality, families])[:24]
+                sid, scope = exclusions.scope(subject, modality)
+                key = sid or fingerprint([VERSION, center, modality, families])[:24]
                 group = groups.setdefault(
                     key,
                     {
@@ -120,6 +167,7 @@ class Identification:
                         "pending_subjects": [],
                         "reason": "",
                         "repeat_subjects": 0,
+                        "auto_skipped_subjects": 0,
                     },
                 )
                 group["subjects"].append(subject)
@@ -130,19 +178,60 @@ class Identification:
                     self.index.records[u].classification_confidence == "high" for u in candidates
                 )
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
+                remaining = exclusions.round(subject, modality) if scope else uids
+                negative_done = bool(scope) and not remaining
+                deferred = bool(scope) and bool(
+                    set(uids) & (set(scope.get("deferred", [])) | self.failed_previews)
+                )
+                conflicted = any(
+                    self.families[u] in scope.get("templates", {})
+                    and exclusions.positive(u, modality)
+                    for u in uids
+                )
+                if negative_done and subject not in scope.get("reviewed_subjects", []):
+                    group["auto_skipped_subjects"] += 1
                 if manual.get("choice") or manual.get("none"):
                     continue
-                if (families and (known or automatic)) or (not families and missing_done):
+                if (
+                    not deferred
+                    and not conflicted
+                    and (
+                        (families and (known or automatic))
+                        or (not families and (missing_done or negative_done))
+                    )
+                ):
                     continue
                 group["pending_subjects"].append(subject)
                 group["reason"] = "missing" if not families else "ambiguous_protocol"
         for group in groups.values():
             pool = group["pending_subjects"] or group["subjects"]
+            actionable = [
+                s
+                for s in pool
+                if any(
+                    u not in exclusions.scope(s, group["modality"])[1].get("deferred", [])
+                    and u not in self.failed_previews
+                    for u in exclusions.round(s, group["modality"])
+                )
+            ]
+            pool = actionable or pool
             rated = [s for s in pool if self.index.decisions[s].get("revision")]
             group["representative"] = (rated or pool)[0]
             group["count"] = len(group["subjects"])
             group["pending_count"] = len(group["pending_subjects"])
             group["needs_protocol"] = bool(group["pending_count"])
+            # Frozen scopes can contain corrected and still-missing subjects. Render only
+            # the representative's candidate families, not an unavailable union.
+            if group["id"] in exclusions.scopes:
+                group["families"] = sorted(
+                    {
+                        self.families[u]
+                        for u in self.index.subjects[group["representative"]]
+                        if self.assignment(u, state)["modality"] == group["modality"]
+                        and not exclusions.excluded(u, group["modality"])
+                    }
+                )
+            group.update(exclusions.annotations(group))
             group["templates"] = []
             for family in group["families"]:
                 sample = self.index.records[self.members[family][0]]
@@ -181,6 +270,8 @@ class Identification:
                     "pending_groups": sum(g["needs_protocol"] for g in subset),
                     "pending_subjects": sum(g["pending_count"] for g in subset),
                     "repeat_subjects_for_quality": sum(g["repeat_subjects"] for g in subset),
+                    "auto_skipped_subjects": sum(g["auto_skipped_subjects"] for g in subset),
+                    "excluded_templates": sum(g["excluded_template_count"] for g in subset),
                 }
             self._catalogue = {
                 "version": VERSION,
@@ -256,7 +347,12 @@ class Identification:
         if not isinstance(raw, dict):
             raise ValueError("invalid sequence rules")
         available = {self.families[u] for u in self.index.subjects[subject]}
-        if not set(group["families"]).issubset(raw) or not set(raw).issubset(available):
+        negative_action = any(
+            k in payload for k in ("negative_templates", "revoke_negative", "deferred_candidates")
+        ) or any(isinstance(e, dict) and e.get("modality") == "other" for e in raw.values())
+        if (not negative_action and not set(group["families"]).issubset(raw)) or not set(
+            raw
+        ).issubset(available):
             raise ValueError("保留本组模板；新增纠错序列须来自当前患者")
         state = copy.deepcopy(self.state)
         edits = {}
@@ -268,7 +364,7 @@ class Identification:
                 raise ValueError("优先级须为 0 到 999 的整数，越小越优先")
             edits[family] = {"modality": modality, "priority": priority}
         winners = [e["priority"] for e in edits.values() if e["modality"] == group["modality"]]
-        if not winners and not payload.get("absent"):
+        if not winners and not payload.get("absent") and not negative_action:
             raise ValueError("请加入正确序列，或明确本例未找到目标序列")
         if winners and Counter(winners)[min(winners)] > 1 and not payload.get("compare_in_quality"):
             raise ValueError("同优先级有不同协议，请设置优先级或确认留待质量阶段比较")
@@ -276,12 +372,44 @@ class Identification:
             if group["families"] or winners:
                 raise ValueError("无目标序列只能逐例确认空候选组；不能批量判定其他患者缺失")
             state["absent"][f"{subject}:{group['modality']}"] = str(payload.get("reason", ""))
-        state["templates"].update(edits)
-        affected = {self.index.records[u].subject_id for f in edits for u in self.members[f]}
+        # A target-negative rule must never relabel a real FLAIR as 'other' while
+        # searching for T1 (or vice versa). Keep it separate from positive assignments.
+        negatives = [f for f, e in edits.items() if e["modality"] == "other"]
+        negative_payload = dict(payload)
+        if negatives:
+            negative_payload["negative_templates"] = sorted(
+                set(payload.get("negative_templates", [])) | set(negatives)
+            )
+            negative_action = True
+        negative_ids = negative_payload.get("negative_templates", [])
+        if set(negative_ids) & {f for f, e in edits.items() if e["modality"] != "other"}:
+            raise ValueError("同一模板不能同时识别为目标和排除")
+        image_stamps = self.check_negative_sources(subject, negative_ids)
+        exclusions = ExclusionView(self, state)
+        negative_affected, negative_conflicts = set(), []
+        if negative_action:
+            negative_affected, negative_conflicts = exclusions.edit(
+                group, subject, negative_payload
+            )
+        for f, entry in edits.items():
+            if entry["modality"] != "other":
+                for scope in state.get("negative_scopes", {}).values():
+                    if scope["modality"] == entry["modality"] and f in scope["templates"]:
+                        raise ConflictError("该模板已有同模态排除规则；请先撤回排除再确认识别")
+                state["templates"][f] = entry
+        affected = {
+            self.index.records[u].subject_id
+            for f, e in edits.items()
+            if e["modality"] != "other"
+            for u in self.members[f]
+        }
+        affected |= negative_affected
         if payload.get("absent"):
             affected.add(subject)
-        conflicts = []
+        conflicts = list(negative_conflicts)
         for f, entry in edits.items():
+            if entry["modality"] == "other":
+                continue
             for uid in self.members[f]:
                 record = self.index.records[uid]
                 rating = self.index.decisions[record.subject_id].get("candidates", {}).get(uid)
@@ -295,12 +423,32 @@ class Identification:
             "conflicts": conflicts,
             "pending_groups_after": sum(g["needs_protocol"] for g in after),
             "changed_templates": edits,
+            "negative_templates": negative_ids,
+            "source_stamps": image_stamps,
+            "auto_skipped_subjects_after": sum(g["auto_skipped_subjects"] for g in after),
+            "pending_subjects_after": sum(g["pending_count"] for g in after),
+            "next_group": next(
+                (
+                    g["id"]
+                    for g in after
+                    if g["needs_protocol"]
+                    and subject in g["subjects"]
+                    and g["modality"] == group["modality"]
+                ),
+                None,
+            ),
             "quality_copied": False,
             "state": state,
         }
         clean = {k: v for k, v in payload.items() if k != "preview_digest"}
         result["preview_digest"] = fingerprint(
-            [clean, result, self.index.inventory_digest, self.index.decisions]
+            [
+                clean,
+                result,
+                self.index.inventory_digest,
+                self.index.decisions,
+                sorted(self.failed_previews),
+            ]
         )
         return result
 
@@ -310,13 +458,37 @@ class Identification:
             raise ConflictError("请先预览当前规则影响，再发布")
         if result["conflicts"]:
             raise ConflictError("存在人工分类冲突；原人工决定保留，请先核对冲突病例")
-        if (
-            not str(payload.get("reason", "")).strip()
-            or not str(payload.get("reviewer", "")).strip()
-        ):
-            raise ValueError("请填写识别依据和审核者")
+        if not str(payload.get("reviewer", "")).strip():
+            raise ValueError("请填写审核者")
         self._save(result["state"], "publish", payload)
-        return {"affected_subjects": result["affected_subjects"], **self.summary()}
+        return {
+            "affected_subjects": result["affected_subjects"],
+            "next_group": result["next_group"],
+            **self.summary(),
+        }
+
+    def check_negative_sources(self, subject: str, families: list[str]) -> dict:
+        """Read only this round's files; catalogue construction never opens images."""
+        stamps = {}
+        for uid in self.index.subjects[subject]:
+            if self.families[uid] not in families:
+                continue
+            path = nifti_source(self.index.config, self.index.records[uid])
+            if uid in self.failed_previews:
+                raise ValueError(f"读取失败，不能排除；请先重试预览: {uid}")
+            stat = path.stat()
+            key = (str(path), stat.st_size, stat.st_mtime_ns)
+            if self._readable.get(uid) != key:
+                try:
+                    image, _ = check_image(path)
+                    # Last voxel forces a compressed file's payload to be readable, not
+                    # merely its header. No resampling or quality certification occurs.
+                    image.dataobj[tuple(n - 1 for n in image.shape)]
+                except (OSError, ValueError, EOFError, ImageFileError) as exc:
+                    raise ValueError(f"读取失败，不能排除；请标记待定: {uid}: {exc}") from exc
+                self._readable[uid] = key
+            stamps[uid] = list(key)
+        return stamps
 
     def transition(self, payload):
         self.require_current_inventory()

@@ -192,6 +192,8 @@ def test_old_preview_failure_is_not_skipped_and_successful_retry_clears_it(tmp_p
     assert target_group(identify)["pending_subjects"] == ["phantom02"]
     fresh = ProtocolIndex(index.config).identification
     assert target_group(fresh)["pending_subjects"] == ["phantom02"]
+    assert target_group(fresh)["deferred_candidates"] == []
+    assert target_group(fresh)["failed_preview_candidates"] == [uid]
     service = ReviewService(index.config)
     try:
         service._prepare_job(uid)
@@ -201,6 +203,30 @@ def test_old_preview_failure_is_not_skipped_and_successful_retry_clears_it(tmp_p
         assert target_group(ProtocolIndex(index.config).identification)["pending_count"] == 0
     finally:
         service.close()
+
+
+def test_failure_does_not_create_defer_and_clearing_saved_defer_does_not_hide_error(tmp_path):
+    index, identify = make_missing(tmp_path, {"phantom01": ["T2-A"]})
+    uid = index.subjects["phantom01"][0]
+    identify.preview_outcome(uid, True)
+    group = target_group(identify)
+    assert group["deferred_candidates"] == []
+    assert group["failed_preview_candidates"] == [uid]
+    p = negative(identify, only=set())
+    p["deferred_candidates"] = [uid]
+    publish(identify, p)
+    assert target_group(identify)["deferred_candidates"] == [uid]
+    p = negative(identify, only=set())
+    p["deferred_candidates"] = []
+    publish(identify, p)
+    assert target_group(identify)["deferred_candidates"] == []
+    assert target_group(identify)["failed_preview_candidates"] == [uid]
+    assert target_group(identify)["pending_count"] == 1
+    assert not identify.state["negative_scopes"][target_group(identify)["negative_scope"]][
+        "templates"
+    ]
+    with pytest.raises(ValueError, match="读取失败"):
+        publish(identify, negative(identify))
 
 
 def test_negative_preview_detects_changed_source_before_publish(tmp_path):

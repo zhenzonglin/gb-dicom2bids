@@ -12,10 +12,8 @@ function identificationCandidates(){
 
 function identificationFailure(id){
   if(!identifying())return;
-  identificationFailures.add(id);identificationDeferred.add(id);
-  document.querySelectorAll('[data-defer-uid]').forEach(box=>{
-    if(box.dataset.deferUid===id){box.checked=true;box.disabled=true;}
-  });
+  // A technical error is not a human decision. Never check or lock a defer box here.
+  identificationFailures.add(id);
   document.querySelector('#identify-publish')?.setAttribute('disabled','');
 }
 
@@ -58,7 +56,7 @@ async function renderIdentification(){
   const slot=current.identification_groups.findIndex(g=>g.id===group.id);
   current.identification_groups[slot]=group;
   identificationDeferred=new Set(group.deferred_candidates||[]);
-  for(const uid of identificationFailures)identificationDeferred.add(uid);
+  for(const uid of group.failed_preview_candidates||[])identificationFailures.add(uid);
   const target=group.modality.toUpperCase();
   content.append(element('h3',`${target} 序列识别 · 同类 ${group.count} 人 · 待识别 ${group.pending_count} 人`));
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
@@ -102,10 +100,11 @@ async function renderIdentification(){
   const reviewer=element('input');reviewer.value='zhenzong';reviewer.setAttribute('aria-label','序列审核者');content.append(reviewer);
   const reviewList=element('details');reviewList.open=true;
   reviewList.append(element('summary','本轮待确认的序列（勾选表示待定，不参与排除）'));
+  reviewList.append(element('p','待定仅由您手动勾选或取消；预览失败不会自动勾选。已保存的待定选择会恢复。','hint'));
   for(const c of current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id))){
     const label=element('label',' '+c.series_description),box=element('input');
     box.type='checkbox';box.dataset.deferUid=c.id;box.checked=identificationDeferred.has(c.id);
-    box.disabled=identificationFailures.has(c.id);box.setAttribute('aria-label','待定 '+c.series_description);
+    box.setAttribute('aria-label','待定 '+c.series_description);
     box.onchange=()=>{if(box.checked)identificationDeferred.add(c.id);else identificationDeferred.delete(c.id);invalidate();};
     label.prepend(box);const row=element('div');row.append(label);reviewList.append(row);
   }
@@ -135,6 +134,8 @@ async function renderIdentification(){
       if(action==='negative'){
         const pending=current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id));
         const blocked=new Set(pending.filter(c=>identificationDeferred.has(c.id)).map(c=>c.family_id));
+        const failed=pending.filter(c=>identificationFailures.has(c.id)&&!blocked.has(c.family_id));
+        if(failed.length)throw Error('以下序列预览失败，不能直接批量排除：'+failed.map(c=>c.series_description).join('；')+'。可重试预览，或由您手动勾选待定后提交其余序列。');
         payload.templates={};
         payload.negative_templates=[...new Set(pending.filter(c=>!blocked.has(c.family_id)).map(c=>c.family_id))];
         payload.deferred_candidates=current.candidates.filter(c=>identificationDeferred.has(c.id)).map(c=>c.id);

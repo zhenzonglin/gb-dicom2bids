@@ -132,9 +132,10 @@ class ExclusionView:
                 {"id": f, "name": self.identify.names.get(f, f)}
                 for f in sorted(scope.get("templates", {}))
             ],
-            "deferred_candidates": sorted(
-                set(scope.get("deferred", []))
-                | {
+            # Only saved user choices drive checkboxes; preview failures stay separate.
+            "deferred_candidates": sorted(set(scope.get("deferred", []))),
+            "failed_preview_candidates": sorted(
+                {
                     u
                     for u in self.identify.failed_previews
                     if self.identify.index.records[u].subject_id in group["subjects"]

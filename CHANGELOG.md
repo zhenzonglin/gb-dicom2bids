@@ -2,6 +2,9 @@
 
 ## Protocol-assisted QC branch patch
 
+- Identification defer checkboxes are user-controlled only: preview failures never check or lock
+  them, and failed-preview metadata is separate from saved defer choices. Read-failure exclusion
+  protection and existing saved decisions are preserved.
 - Stream legacy private JSON inventories without retaining a second complete decoded list;
   report startup stages, read bytes and record counts while preparing the identification index.
 - Patient-list initialization has no fixed timeout or CPU/disk utilization gate. Delay auxiliary

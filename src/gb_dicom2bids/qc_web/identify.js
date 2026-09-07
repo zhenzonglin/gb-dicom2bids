@@ -61,6 +61,7 @@ async function renderIdentification(){
   content.append(element('h3',`${target} 序列识别 · 同类 ${group.count} 人 · 待识别 ${group.pending_count} 人`));
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
   content.append(element('p',`有效 ${target} 候选归属明确、无目标候选冲突或待定时，该患者结束 ${target} 识别；无需继续排除无关序列。`,'hint'));
+  content.append(element('p',`保留 ${target}、仅移出部分模板时，请在对应模板的下拉框选择“不是 ${target}（移出候选）”，再预览同类影响；预览失败不阻拦排除，手动勾选待定的模板仍受保护。`,'hint'));
   const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality));
   if(excludedTargets.length)content.append(element('p',`以下带 ${target} 标签的序列已被本组排除，不是有效候选：${excludedTargets.map(c=>c.series_description).join('；')}。如需恢复，请展开“已排除模板 / 撤回排除”，撤回对应模板后再加入 ${target} 识别。`,'list-error'));
   content.append(element('p',`本轮新序列 ${group.new_template_count??0} 种 · 累计排除 ${group.excluded_template_count??0} 种 · 自动跳过 ${group.auto_skipped_subjects??0} 人 · 剩余待识别 ${group.pending_count} 人`));
@@ -134,6 +135,16 @@ async function renderIdentification(){
     templates:Object.fromEntries([...entries].map(([id,e])=>[id,{modality:e.modality,priority:e.priority}]))});
   async function doPreview(action='positive'){
     try{payload=makePayload();
+      if(action==='positive'){
+        // A mixed decision excludes only the explicitly rejected template rows,
+        // never every unchecked optional sequence in the current round.
+        const rejected=Object.entries(payload.templates).filter(([,entry])=>entry.modality==='other').map(([id])=>id);
+        if(rejected.length){
+          payload.negative_source_policy='identity_only';
+          payload.negative_templates=rejected;
+          payload.deferred_candidates=current.candidates.filter(c=>identificationDeferred.has(c.id)).map(c=>c.id);
+        }
+      }
       if(action==='negative'){
         const pending=current.candidates.filter(c=>(group.new_candidate_ids||[]).includes(c.id));
         const blocked=new Set(pending.filter(c=>identificationDeferred.has(c.id)).map(c=>c.family_id));
@@ -145,7 +156,7 @@ async function renderIdentification(){
       }
       if(action==='revoke'){payload.templates={};payload.revoke_negative=[...revoked];if(!revoked.size)throw Error('请先勾选要撤回的模板。');}
       const result=await api('/api/identify/preview',payload);
-      const names=(payload.negative_templates||[]).map(f=>current.candidates.find(c=>c.family_id===f)?.series_description||f);
+      const names=(result.negative_templates||[]).map(f=>current.candidates.find(c=>c.family_id===f)?.series_description||f);
       report.textContent=(names.length?'将确认以下模板不是 '+target+'（含未勾选的预览失败项；仅序列排除，不判断质量）：\n'+names.join('\n')+'\n\n':'')+JSON.stringify(result,null,2);payload.preview_digest=result.preview_digest;
       publish.disabled=result.conflicts.length>0;
     }catch(error){payload=null;publish.disabled=true;message(error.message,true);}

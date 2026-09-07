@@ -180,8 +180,13 @@ class Identification:
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
                 remaining = exclusions.round(subject, modality) if scope else uids
                 negative_done = bool(scope) and not remaining
+                target_identified = bool(families) and (known or automatic)
+                # Once target protocols are settled, optional non-target images
+                # cannot keep this participant in the identification queue. Preserve
+                # their saved defers/errors; only target issues still block completion.
+                relevant = candidates if target_identified else remaining
                 deferred = bool(scope) and bool(
-                    set(remaining) & (set(scope.get("deferred", [])) | self.failed_previews)
+                    set(relevant) & (set(scope.get("deferred", [])) | self.failed_previews)
                 )
                 conflicted = any(
                     self.families[u] in scope.get("templates", {})
@@ -196,7 +201,7 @@ class Identification:
                     not deferred
                     and not conflicted
                     and (
-                        (families and (known or automatic))
+                        target_identified
                         or (not families and (missing_done or negative_done))
                     )
                 ):

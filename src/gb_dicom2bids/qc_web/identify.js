@@ -60,6 +60,9 @@ async function renderIdentification(){
   const target=group.modality.toUpperCase();
   content.append(element('h3',`${target} 序列识别 · 同类 ${group.count} 人 · 待识别 ${group.pending_count} 人`));
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
+  content.append(element('p',`有效 ${target} 候选归属明确、无目标候选冲突或待定时，该患者结束 ${target} 识别；无需继续排除无关序列。`,'hint'));
+  const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality));
+  if(excludedTargets.length)content.append(element('p',`以下带 ${target} 标签的序列已被本组排除，不是有效候选：${excludedTargets.map(c=>c.series_description).join('；')}。如需恢复，请展开“已排除模板 / 撤回排除”，撤回对应模板后再加入 ${target} 识别。`,'list-error'));
   content.append(element('p',`本轮新序列 ${group.new_template_count??0} 种 · 累计排除 ${group.excluded_template_count??0} 种 · 自动跳过 ${group.auto_skipped_subjects??0} 人 · 剩余待识别 ${group.pending_count} 人`));
   const showAllLabel=element('label',' 查看全部序列（含已排除）'),showAll=element('input');
   showAll.id='identify-show-all';showAll.type='checkbox';showAll.checked=identificationShowAll;showAllLabel.prepend(showAll);content.append(showAllLabel);

@@ -322,7 +322,9 @@ class ReviewService:
             row = self.selection.get((subject, record.study_uid_hash, record.series_uid_hash))
             item = record.public_dict()
             if assist:
-                item["candidate_type"] = assist.assignment(uid)["modality"]
+                assignment = assist.assignment(uid)
+                item["candidate_type"] = assignment["modality"]
+                item["excluded_modalities"] = assignment.get("excluded_modalities", [])
                 item["template_id"] = assist.templates[uid]["id"]
                 item["assist"] = triage.get(uid, {})
                 if assist.identification:

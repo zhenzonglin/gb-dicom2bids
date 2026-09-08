@@ -47,8 +47,14 @@ class ExclusionView:
         )
 
     def round(self, subject: str, modality: str) -> list[str]:
+        _, scope = self.scope(subject, modality)
         return sorted(
-            u for u in self.identify.index.subjects[subject] if not self.excluded(u, modality)
+            u
+            for u in self.identify.index.subjects[subject]
+            if not self.excluded(u, modality)
+            and (
+                not self.identify.default_excluded(u, self.state) or u in scope.get("deferred", [])
+            )
         )
 
     def edit(self, group: dict, subject: str, payload: dict) -> tuple[set[str], list[dict]]:

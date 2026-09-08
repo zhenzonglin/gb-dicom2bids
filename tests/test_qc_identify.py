@@ -181,7 +181,10 @@ def test_duplicate_same_protocol_remains_quality_comparison(tmp_path):
     identify = Identification(index)
     index.identification = identify
     group = next(g for g in identify.catalogue()["groups"] if g["modality"] == "flair")
-    assert not group["needs_protocol"] and group["repeat_subjects"] == 1
+    assert group["needs_protocol"] and group["repeat_subjects"] == 1
+    publish(identify, payload_for(identify, "flair"))
+    group = next(g for g in identify.catalogue()["groups"] if g["modality"] == "flair")
+    assert not group["needs_protocol"]  # Human confirms the protocol; no image is auto-chosen.
     assert index.choices(original.subject_id)["flair"]["top_count"] == 2
     assert index.choices(original.subject_id)["flair"]["choice"] is None
 

@@ -85,7 +85,7 @@ def test_iterative_new_sequences_skip_duplicates_and_finish_absent(tmp_path):
     assert target_group(identify)["representative"] == "phantom04"
     publish(identify, negative(identify))
     group = target_group(identify)
-    assert group["pending_count"] == 0 and group["excluded_template_count"] == 5
+    assert group["pending_count"] == 0 and group["excluded_template_count"] == 4
     assert identify.summary()["counts"]["flair"]["pending_subjects"] == 4
     assert all(not read_decision(index.root.parent, s)["groups"] for s in index.subjects)
     assert all(digest(p) == d for p, d in before.items())

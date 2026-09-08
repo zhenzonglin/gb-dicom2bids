@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 
 from .models import SeriesRecord
+
+CLASSIFICATION_VERSION = "sequence-defaults-2"
 
 T1_KEYWORDS = (
     "t1",
@@ -41,6 +44,52 @@ def compact_text(*values: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text)
 
 
+def default_classification(record: SeriesRecord) -> dict:
+    """Pure name/timing suggestion. Never modifies source identity or manual decisions."""
+    names = [
+        unicodedata.normalize("NFKC", value or "").lower()
+        for value in (record.series_description, record.protocol_name, record.sequence_name)
+    ]
+    compact = [compact_text(name) for name in names]
+    tokens = [normalized_text(name) for name in names]
+    modality, confidence, reason, excluded = "other", "low", "unrecognized", False
+    non_target = (
+        ("ct", r"(?<![a-z0-9])ct(?![a-z0-9])"),
+        ("tof", r"(?<![a-z0-9])(?:[23]d[ _-]*)?tof(?:[ _-]*[23]d)?(?![a-z0-9])"),
+        ("mra", r"(?<![a-z0-9])(?:[23]d[ _-]*)?mra\d*(?![a-z0-9])"),
+        ("dwi", r"(?<![a-z0-9])(?:[dei]*|iso|[23]d[ _-]*)dwi(?![a-z0-9])"),
+        ("b0", r"(?<![a-z0-9])(?:[esd])?b[ _-]*0(?![a-z0-9])"),
+        ("b1000", r"(?<![a-z0-9])(?:[esd])?b[ _-]*1000(?![a-z0-9])"),
+    )
+    hit = next(
+        (label for label, regex in non_target if any(re.search(regex, n) for n in names)), None
+    )
+    # Preserve existing localizer/projection guards, without combining two names.
+    projection = any(t in name for name in tokens for t in EXCLUDED_TOKENS) or any(
+        token in normalized_text(*record.image_type) for token in EXCLUDED_TOKENS
+    )
+    if record.modality.upper() != "MR" or hit or projection:
+        excluded, confidence = True, "high"
+        reason = "non_target_" + (hit or ("projection" if projection else record.modality.lower()))
+    elif any("t1" in name and "flair" in name for name in compact):
+        modality, confidence, reason = "t1", "high", "name_t1_and_flair"
+    elif any(k in name for name in compact for k in FLAIR_KEYWORDS):
+        modality, confidence, reason = "flair", "high", "name_flair"
+    elif _plausible_flair_timing(record) and not any(
+        k in name for name in compact for k in T1_KEYWORDS
+    ):
+        modality, confidence, reason = "flair", "medium", "flair_timing"
+    elif any(k in name for name in compact for k in T1_KEYWORDS):
+        modality, confidence, reason = "t1", "high", "name_t1"
+    return {
+        "modality": modality,
+        "confidence": confidence,
+        "reason": reason,
+        "excluded": excluded,
+        "version": CLASSIFICATION_VERSION,
+    }
+
+
 def source_kind(image_type: list[str], description: str, protocol: str) -> str:
     tokens = {str(value).upper() for value in image_type}
     text = normalized_text(description, protocol)
@@ -69,33 +118,9 @@ def _plausible_flair_timing(record: SeriesRecord) -> bool:
 
 
 def classify_record(record: SeriesRecord) -> SeriesRecord:
-    values = (
-        record.series_description,
-        record.protocol_name,
-        record.sequence_name,
-        " ".join(record.image_type),
-    )
-    text = compact_text(*values)
-    excluded_text = normalized_text(*values)
-    excluded = any(token in excluded_text for token in EXCLUDED_TOKENS)
-    has_flair_name = any(keyword in text for keyword in FLAIR_KEYWORDS)
-    has_t1_name = any(keyword in text for keyword in T1_KEYWORDS)
-
-    if record.modality.upper() != "MR" or excluded:
-        record.candidate_type = "other"
-        record.classification_confidence = "high" if excluded else "low"
-    elif has_flair_name:
-        record.candidate_type = "flair"
-        record.classification_confidence = "high"
-    elif _plausible_flair_timing(record) and not has_t1_name:
-        record.candidate_type = "flair"
-        record.classification_confidence = "medium"
-    elif has_t1_name:
-        record.candidate_type = "t1"
-        record.classification_confidence = "high"
-    else:
-        record.candidate_type = "other"
-        record.classification_confidence = "low"
+    suggestion = default_classification(record)
+    record.candidate_type = suggestion["modality"]
+    record.classification_confidence = suggestion["confidence"]
 
     record.source_kind = source_kind(
         record.image_type, record.series_description, record.protocol_name

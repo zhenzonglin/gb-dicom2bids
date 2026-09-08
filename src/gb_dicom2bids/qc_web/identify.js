@@ -21,8 +21,10 @@ function displayWorkflow(value){
   workflow=value;
   document.body.classList.toggle('identifying',identifying());
   $('#workflow').hidden=!value.enabled;
+  $('#open-rule-review').disabled=!value.enabled;
   if(!value.enabled)return;
   const t=value.counts.t1,f=value.counts.flair;
+  $('#default-summary').textContent=`人工完成 T1 ${t.manual_completed??0} / FLAIR ${f.manual_completed??0} · 自动唯一识别 T1 ${t.automatic_unique??0} / FLAIR ${f.automatic_unique??0} · 多候选待识别 T1 ${t.multiple_candidates??0} / FLAIR ${f.multiple_candidates??0} · 默认非目标 ${value.default_excluded_series??0} 条。识别完成不代表质量通过。`;
   $('#workflow-status').textContent=identifying()
     ?`阶段 1 · 序列识别：T1 待识别 ${t.pending_groups} 组 / ${t.pending_subjects} 人；FLAIR 待识别 ${f.pending_groups} 组 / ${f.pending_subjects} 人。此阶段不判断图像质量。`
     :'阶段 2 · 质量检查：序列识别已完成。质量逐幅判断，不从代表病例复制。';

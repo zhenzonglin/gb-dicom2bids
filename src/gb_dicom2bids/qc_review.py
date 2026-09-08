@@ -325,6 +325,9 @@ class ReviewService:
                 assignment = assist.assignment(uid)
                 item["candidate_type"] = assignment["modality"]
                 item["excluded_modalities"] = assignment.get("excluded_modalities", [])
+                item["default_excluded"] = assignment.get("default_excluded", False)
+                item["default_classification"] = assignment.get("default_classification", {})
+                item["classification_source"] = assignment.get("classification_source", "default")
                 item["template_id"] = assist.templates[uid]["id"]
                 item["assist"] = triage.get(uid, {})
                 if assist.identification:

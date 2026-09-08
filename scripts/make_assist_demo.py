@@ -15,7 +15,7 @@ from gb_dicom2bids.qc_protocols import ProtocolIndex
 from gb_dicom2bids.runtime import atomic_write_json
 
 
-def make_demo(root: Path, *, negative: bool = False) -> Path:
+def make_demo(root: Path, *, negative: bool = False, sequences: dict | None = None) -> Path:
     root = root.resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError("demo destination must be new or empty")
@@ -39,12 +39,16 @@ def make_demo(root: Path, *, negative: bool = False) -> Path:
     radius = ((x - 32) / 23) ** 2 + ((y - 32) / 27) ** 2 + ((z - 16) / 14) ** 2
     data = (radius < 1) * (80 + 20 * np.cos(radius * 24) + 7 * np.sin(x * 0.7))
     subjects = ("phantom01", "phantom02", "phantom03") if negative else ("phantom01", "phantom02")
+    if sequences is not None:
+        subjects = tuple(sequences)
     for subject in subjects:
         names = ["eT1W-SE", "T1-repeat", "eFLAIR-longTR-CLEAR", "unknown-contrast"]
         if negative:
             names = ["T2-A", "DWI-B", "eFLAIR-longTR-CLEAR"]
             if subject == "phantom03":
                 names.append("unknown-contrast")
+        if sequences is not None:
+            names = sequences[subject]
         for name in names:
             folder = root / "source" / "synthetic_site" / subject / name
             folder.mkdir(parents=True)

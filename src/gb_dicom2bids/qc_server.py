@@ -77,7 +77,13 @@ def handler_class(service: ReviewService, token: str):
                         .replace("__QC_TOKEN__", token)
                     )
                     self.send(200, html.encode(), "text/html; charset=utf-8")
-                elif url.path in {"/app.js", "/assist.js", "/identify.js", "/style.css"}:
+                elif url.path in {
+                    "/app.js",
+                    "/assist.js",
+                    "/identify.js",
+                    "/rules.js",
+                    "/style.css",
+                }:
                     self.send(
                         200,
                         (assets / url.path[1:]).read_bytes(),
@@ -87,6 +93,14 @@ def handler_class(service: ReviewService, token: str):
                     self.json_response(200, service.list_subjects(query))
                 elif url.path == "/api/subject":
                     self.json_response(200, service.subject(query.get("id", "")))
+                elif url.path == "/api/identify/rules":
+                    # Return a single revision snapshot, even if another tab publishes.
+                    with service.lock:
+                        identify = service.assistance().identification
+                        if not identify:
+                            raise ValueError("请先运行 qc_assist.py catalog")
+                        result = identify.review_rules(query)
+                    self.json_response(200, result)
                 elif url.path == "/api/identify":
                     if not (service.root / "assist/identification.json").exists():
                         self.json_response(200, {"enabled": False})
@@ -180,12 +194,15 @@ def handler_class(service: ReviewService, token: str):
                     "/api/identify/preview",
                     "/api/identify/publish",
                     "/api/identify/transition",
+                    "/api/identify/revoke_preview",
+                    "/api/identify/revoke_publish",
                 }:
                     with (
                         writer_lock(service.config),
                         file_lock(service.root / ".decisions.lock"),
                         file_lock(service.root / "assist/.assist.lock"),
                         file_lock(service.root / "assist/.features.lock"),
+                        service.lock,
                     ):
                         assert_pipeline_idle(service.config)
                         identify = service.assistance().identification
@@ -207,7 +224,7 @@ def handler_class(service: ReviewService, token: str):
                         result = getattr(identify, operation)(body)
                         result.pop("state", None)
                         result.pop("source_stamps", None)
-                        if operation != "preview":
+                        if operation not in {"preview", "revoke_preview"}:
                             service.write_accepted()
                     self.json_response(200, result)
                 elif self.path in {

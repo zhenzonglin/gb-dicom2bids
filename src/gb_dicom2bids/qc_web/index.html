@@ -8,6 +8,7 @@
 <h2>待阅队列 <span id="total">—</span></h2>
 <select id="assist-queue"><option value="">全部患者</option><option value="protocol">序列待识别 · 每组一例</option><option value="identified">全部 T1/FLAIR 协议组 · 可纠错</option><option value="quality_review">质量待复核</option><option value="audit">自动通过抽查</option><option value="auto_pass">已自动通过</option></select>
 <div id="assist-progress" class="hint"></div>
+<button id="open-rule-review">规则回顾 / 撤销</button>
 <input id="search" placeholder="受试者 / 序列名称">
 <div class="filter-pair"><input id="center" placeholder="中心"><input id="protocol" placeholder="协议编号"></div>
 <select id="auto-status"><option value="">全部自动状态</option><option value="selected">自动入选</option><option value="review">待复核</option><option value="excluded">排除</option></select>
@@ -18,7 +19,7 @@
 <p class="hint">自动入选是推荐，不等于人工通过。<br>重扫候选可逐一比较。</p>
 </aside>
 <main><div class="notice">两个展示窗可按文件夹名独立选择序列，再人工指定为T1、FLAIR或其他。每个候选只显示原始NIfTI第三维体素切片，不做轴、冠、矢正交重切或插值，也不据显示方向推断原始采集方向。</div>
-<section id="workflow" hidden><p id="workflow-status"></p><button id="next-stage"></button></section>
+<section id="workflow" hidden><p id="workflow-status"></p><p id="default-summary" class="hint"></p><button id="next-stage"></button></section>
 <details id="protocol-panel" hidden><summary>协议识别与批量复用</summary><div id="protocol-content"></div></details>
 <div id="panes"><section class="empty">从左侧选择受试者，开始并排阅片。</section></div>
 <section id="decision-bar" hidden>
@@ -26,4 +27,27 @@
 <div><b>FLAIR最终选择</b><span id="choice-flair">未确定</span><button data-none="flair">无可用FLAIR</button><button data-clear="flair">清除选择</button><input id="none-reason-flair" placeholder="无可用候选的原因"></div></div>
 <div class="save-row"><label>审核者 <input id="reviewer" value="zhenzong"></label><span id="revision"></span><button id="save">保存决定</button><button id="save-next" class="primary">保存并下一例 →</button></div>
 </section></main><footer><span id="message">等待载入</span><span>仅保存QC决定 · 不在浏览器中修改BIDS</span></footer>
-<script src="/identify.js"></script><script src="/assist.js"></script><script src="/app.js"></script></body></html>
+<dialog id="rule-review" aria-labelledby="rule-review-title">
+<div class="rule-toolbar"><h2 id="rule-review-title">序列规则回顾</h2><button id="close-rule-review">关闭回顾</button></div>
+<p class="hint">仅撤销当前序列识别规则，不回滚整份历史，不修改逐影像质量记录或 BIDS。人工影像决定仍具有最高优先级。</p>
+<div class="rule-filters">
+<select id="rule-view" aria-label="规则视图"><option value="active">当前生效</option><option value="history">操作历史</option></select>
+<select id="rule-kind" aria-label="规则类型"><option value="">全部类型</option><option value="include">纳入 / 优先级</option><option value="exclude">排除</option><option value="absent">未找到目标</option><option value="recheck">重新人工识别</option></select>
+<select id="rule-modality" aria-label="目标模态"><option value="">T1 / FLAIR</option><option value="t1">T1</option><option value="flair">FLAIR</option></select>
+<input id="rule-center" placeholder="中心（精确匹配）" aria-label="规则中心">
+<input id="rule-subject" placeholder="患者编号" aria-label="规则患者">
+<input id="rule-query" placeholder="模板名称" aria-label="规则模板名称">
+<button id="rule-search">查询规则</button>
+</div>
+<p id="rule-status" role="status"></p><div id="rule-rows"></div>
+<nav><button id="rule-prev">规则上一页</button><button id="rule-next">规则下一页</button></nav>
+<div class="rule-toolbar">
+<label><input type="checkbox" id="rule-recheck">撤销后保留待定，重新人工识别</label>
+<label>审核者 <input id="rule-reviewer" value="zhenzong"></label>
+</div>
+<label id="rule-return-label" hidden><input type="checkbox" id="rule-return">确认返回序列识别并暂停质量授权（不改已有质量记录）</label>
+<p class="hint">不勾选“保留待定”时恢复默认规则，唯一候选可能自动完成。撤销默认非目标的人工纠正规则后，该序列可能再次默认排除。</p>
+<div class="rule-toolbar"><button id="rule-preview">预览撤销影响</button><button id="rule-publish" class="primary" disabled>确认撤销</button></div>
+<pre id="rule-report" aria-live="polite"></pre>
+</dialog>
+<script src="/identify.js"></script><script src="/assist.js"></script><script src="/rules.js"></script><script src="/app.js"></script></body></html>

@@ -28,10 +28,19 @@ def check(output: Path, channel: str | None):
     errors, external = [], []
     with tempfile.TemporaryDirectory(prefix="synthetic-target-completion-") as folder:
         config = load_config(make_demo(Path(folder)))
-        # This synthetic target deliberately requires an explicit protocol publication.
+        # A genuinely unknown synthetic name requires explicit human identification;
+        # a low legacy confidence no longer prevents a named unique T1 auto-completion.
         records = load_private_records(config.paths.audit_root)
         records = [
-            replace(r, classification_confidence="low") if r.candidate_type == "t1" else r
+            replace(
+                r,
+                classification_confidence="low",
+                series_description="manual-target",
+                protocol_name="manual-target",
+                sequence_name="",
+            )
+            if r.series_description == "eT1W-SE"
+            else r
             for r in records
         ]
         write_inventory(config.paths.audit_root, records, [])
@@ -41,11 +50,17 @@ def check(output: Path, channel: str | None):
         identify.enable()
         group = next(g for g in identify.catalogue()["groups"] if g["modality"] == "t1")
         uids = {index.records[u].series_description: u for u in index.subjects["phantom01"]}
-        uid, deferred = uids["eT1W-SE"], uids["unknown-contrast"]
+        uid, deferred = uids["manual-target"], uids["unknown-contrast"]
         payload = {
-            "subject": "phantom01", "group": group["id"], "revision": identify.state["revision"],
-            "reviewer": "zhenzong", "templates": {}, "negative_source_policy": "identity_only",
-            "negative_templates": [identify.families[uids[n]] for n in ("eT1W-SE", "T1-repeat")],
+            "subject": "phantom01",
+            "group": group["id"],
+            "revision": identify.state["revision"],
+            "reviewer": "zhenzong",
+            "templates": {},
+            "negative_source_policy": "identity_only",
+            "negative_templates": [
+                identify.families[uids[n]] for n in ("manual-target", "T1-repeat")
+            ],
             "deferred_candidates": [deferred],
         }
         preview = identify.preview(payload)
@@ -63,11 +78,15 @@ def check(output: Path, channel: str | None):
                 browser = runtime.chromium.launch(headless=True, channel=channel)
                 page = browser.new_page(viewport={"width": 1500, "height": 1250})
                 page.on("pageerror", lambda e: errors.append(str(e)))
-                page.on("request", lambda r: external.append(r.url)
-                        if not r.url.startswith((url, "blob:")) else None)
+                page.on(
+                    "request",
+                    lambda r: (
+                        external.append(r.url) if not r.url.startswith((url, "blob:")) else None
+                    ),
+                )
                 page.goto(url, wait_until="networkidle")
                 panel = page.locator("#protocol-content")
-                expect(panel.locator(".list-error")).to_contain_text("eT1W-SE")
+                expect(panel.locator(".list-error")).to_contain_text("T1-repeat")
                 expect(panel.locator(".list-error")).to_contain_text("不是有效候选")
                 page.locator("#identify-show-all").check()
                 pane = page.locator(".pane").first
@@ -79,14 +98,19 @@ def check(output: Path, channel: str | None):
                 expect(page.locator(".frame img[src]")).to_have_count(2, timeout=15000)
                 page.screenshot(path=str(output / "excluded-label.png"), full_page=True)
                 panel.get_by_text("已排除模板 / 撤回排除", exact=True).click()
-                panel.get_by_label("撤回 et1w-se", exact=True).check()
+                panel.get_by_label("撤回 manual-target", exact=True).check()
                 panel.get_by_role("button", name="预览撤回排除").click()
                 publish = panel.get_by_role("button", name="确认识别并应用同类")
                 expect(publish).to_be_enabled()
                 publish.click()
+                expect(page.locator("#message")).to_contain_text("序列规则已应用至")
+                # Restore a template explicitly into the target comparison list.
+                panel.get_by_label("纠错备选序列").select_option(uid)
+                expect(panel.get_by_label("纠错备选序列")).to_have_value(uid)
+                panel.get_by_role("button", name="将备选加入 T1 识别").click()
                 expect(panel.get_by_label("序列归属")).to_have_count(1)
                 expect(panel.get_by_label("待定 unknown-contrast", exact=True)).to_be_checked()
-                expect(panel.locator(".protocol-row").first).to_contain_text("eT1W-SE")
+                expect(panel.locator(".protocol-row").first).to_contain_text("manual-target")
                 panel.get_by_role("button", name="预览同类影响").click()
                 expect(publish).to_be_enabled()
                 publish.click()

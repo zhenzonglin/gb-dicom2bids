@@ -8,11 +8,12 @@ from collections import Counter, defaultdict
 
 from nibabel.filebasedimages import ImageFileError
 
+from .classify import CLASSIFICATION_VERSION, default_classification
 from .qc_exclusions import ExclusionView
 from .qc_images import check_image
 from .qc_protocols import explicit, fingerprint, normalize_name
 from .qc_protocols import source_path as nifti_source
-from .qc_state import ConflictError, effective_modality
+from .qc_state import ConflictError, effective_modality, record_digest
 from .runtime import atomic_write_json, read_json, utc_now
 
 VERSION = "identify-1"
@@ -65,6 +66,9 @@ class Identification:
         self._catalogue = None
         self._exclusions = None
         self._readable = {}
+        self.defaults = {u: default_classification(r) for u, r in index.records.items()}
+        self._subject_stamps = {}
+        self._review_cache = None
         # Read only the sparse error directory, never probe every source image.
         self.failed_previews = {
             p.stem
@@ -104,6 +108,69 @@ class Identification:
     def invalidate(self):
         self._catalogue = None
         self._exclusions = None
+        self._review_cache = None
+
+    def defaults_enabled(self, state=None):
+        return (self.state if state is None else state).get(
+            "defaults_version"
+        ) == CLASSIFICATION_VERSION
+
+    def subject_stamp(self, subject):
+        if subject not in self._subject_stamps:
+            self._subject_stamps[subject] = fingerprint(
+                [
+                    (u, record_digest(self.index.records[u]))
+                    for u in sorted(self.index.subjects[subject])
+                ]
+            )
+        return self._subject_stamps[subject]
+
+    def retain_manual_completions(self, state, groups):
+        """Freeze only genuinely human-resolved members, not an entire partly reviewed group."""
+        retained = state.setdefault("manual_completed", {})
+        for group in groups:
+            modality = group["modality"]
+            pending = set(group["pending_subjects"])
+            for subject in group["subjects"]:
+                if subject in pending:
+                    continue
+                key = f"{subject}:{modality}"
+                uids = self.index.subjects[subject]
+                families = {
+                    self.families[u]
+                    for u in uids
+                    if self.assignment(u, state)["modality"] == modality
+                    and not self.exclusions(state).excluded(u, modality)
+                }
+                manual = self.index.decisions[subject].get("groups", {}).get(modality, {})
+                _, scope = self.exclusions(state).scope(subject, modality)
+                known = families and all(f in state.get("templates", {}) for f in families)
+                missing = key in state.get("absent", {}) or (
+                    scope.get("templates") and not self.exclusions(state).round(subject, modality)
+                )
+                if known or missing or manual.get("choice") or manual.get("none"):
+                    retained[key] = {"stamp": self.subject_stamp(subject), "source": "manual"}
+
+    def default_excluded(self, uid, state=None):
+        state = self.state if state is None else state
+        if not self.defaults_enabled(state) or not self.defaults[uid]["excluded"]:
+            return False
+        record = self.index.records[uid]
+        rating = self.index.decisions[record.subject_id].get("candidates", {}).get(uid)
+        saved = state.get("templates", {}).get(self.families[uid], {})
+        if any(
+            uid
+            in state.get("recheck", {}).get(f"{record.subject_id}:{m}", {}).get("candidates", [])
+            for m in ("t1", "flair")
+        ):
+            return False
+        # A deliberate human correction always takes precedence over name defaults.
+        return not (explicit(rating) or saved.get("modality") in {"t1", "flair"})
+
+    def clear_completion(self, state, subjects, modalities=("t1", "flair")):
+        for subject in subjects:
+            for modality in modalities:
+                state.get("manual_completed", {}).pop(f"{subject}:{modality}", None)
 
     def enable(self):
         self.require_current_inventory()
@@ -115,11 +182,23 @@ class Identification:
                     "phase": "identification",
                     "templates": {},
                     "absent": {},
+                    "defaults_version": CLASSIFICATION_VERSION,
                 },
                 "enable",
             )
-        elif self.state.get("inventory_stamp") != inventory_stamp(self.root):
-            self._save(dict(self.state, phase="identification"), "inventory_changed")
+        else:
+            if not self.defaults_enabled():
+                state = copy.deepcopy(self.state)
+                backup = (
+                    self.root / "identification_backups" / f"defaults-{state['revision']:09d}.json"
+                )
+                if not backup.exists():
+                    atomic_write_json(backup, state)
+                self.retain_manual_completions(state, self._groups(state))
+                state.update(defaults_version=CLASSIFICATION_VERSION, phase="identification")
+                self._save(state, "default_classification_upgrade")
+            elif self.state.get("inventory_stamp") != inventory_stamp(self.root):
+                self._save(dict(self.state, phase="identification"), "inventory_changed")
         return self.catalogue()
 
     def assignment(self, uid, state=None):
@@ -128,14 +207,31 @@ class Identification:
         saved = state.get("templates", {}).get(self.families[uid], {})
         rating = self.index.decisions[record.subject_id].get("candidates", {}).get(uid)
         manual = explicit(rating)
+        default = (
+            self.defaults[uid]
+            if self.defaults_enabled(state)
+            else {
+                "modality": record.candidate_type,
+                "confidence": record.classification_confidence,
+                "reason": "legacy_inventory",
+                "version": "legacy",
+            }
+        )
         return {
             "modality": effective_modality(record, rating)
             if manual
-            else saved.get("modality", record.candidate_type),
+            else saved.get("modality", default["modality"]),
             "priority": saved.get("priority", 100),
             "manual": manual,
             "template_id": self.index.templates[uid]["id"],
             "family_id": self.families[uid],
+            "default_classification": default,
+            "default_excluded": self.default_excluded(uid, state),
+            "classification_source": "manual_image"
+            if manual
+            else "manual_rule"
+            if saved
+            else "default",
             "excluded_modalities": [
                 m for m in ("t1", "flair") if self.exclusions(state).excluded(uid, m)
             ],
@@ -168,26 +264,32 @@ class Identification:
                         "reason": "",
                         "repeat_subjects": 0,
                         "auto_skipped_subjects": 0,
+                        "completion_counts": Counter(),
                     },
                 )
                 group["subjects"].append(subject)
                 group["repeat_subjects"] += int(len(candidates) > len(families))
                 manual = self.index.decisions[subject].get("groups", {}).get(modality, {})
                 known = all(f in state.get("templates", {}) for f in families)
-                automatic = len(families) == 1 and all(
-                    self.index.records[u].classification_confidence == "high" for u in candidates
+                automatic = len(
+                    candidates if self.defaults_enabled(state) else families
+                ) == 1 and all(
+                    self.assignment(u, state)["default_classification"]["confidence"] == "high"
+                    for u in candidates
                 )
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
-                remaining = exclusions.round(subject, modality) if scope else uids
+                remaining = exclusions.round(subject, modality)
                 negative_done = bool(scope) and not remaining
+                default_done = self.defaults_enabled(state) and not remaining
                 target_identified = bool(families) and (known or automatic)
                 # Once target protocols are settled, optional non-target images
                 # cannot keep this participant in the identification queue. Preserve
                 # their saved defers/errors; only target issues still block completion.
                 relevant = candidates if target_identified else remaining
-                deferred = bool(scope) and bool(
-                    set(relevant) & (set(scope.get("deferred", [])) | self.failed_previews)
+                deferred = bool(set(relevant) & set(scope.get("deferred", []))) or bool(
+                    scope and set(relevant) & self.failed_previews
                 )
+                recheck = f"{subject}:{modality}" in state.get("recheck", {})
                 conflicted = any(
                     self.families[u] in scope.get("templates", {})
                     and exclusions.positive(u, modality)
@@ -195,19 +297,31 @@ class Identification:
                 )
                 if negative_done and subject not in scope.get("reviewed_subjects", []):
                     group["auto_skipped_subjects"] += 1
-                if manual.get("choice") or manual.get("none"):
+                retained = state.get("manual_completed", {}).get(f"{subject}:{modality}", {})
+                protected = bool(retained) and retained.get("stamp") == self.subject_stamp(subject)
+                if manual.get("choice") or manual.get("none") or (protected and not recheck):
+                    group["completion_counts"]["manual_completed"] += 1
                     continue
                 if (
                     not deferred
                     and not conflicted
+                    and not recheck
                     and (
                         target_identified
-                        or (not families and (missing_done or negative_done))
+                        or (not families and (missing_done or negative_done or default_done))
                     )
                 ):
+                    label = (
+                        "manual_completed"
+                        if known and families or missing_done or negative_done
+                        else ("automatic_unique" if target_identified else "default_skipped")
+                    )
+                    group["completion_counts"][label] += 1
                     continue
                 group["pending_subjects"].append(subject)
                 group["reason"] = "missing" if not families else "ambiguous_protocol"
+                label = "multiple_candidates" if len(candidates) > 1 else "unknown_pending"
+                group["completion_counts"][label] += 1
         for group in groups.values():
             pool = group["pending_subjects"] or group["subjects"]
             actionable = [
@@ -277,11 +391,25 @@ class Identification:
                     "repeat_subjects_for_quality": sum(g["repeat_subjects"] for g in subset),
                     "auto_skipped_subjects": sum(g["auto_skipped_subjects"] for g in subset),
                     "excluded_templates": sum(g["excluded_template_count"] for g in subset),
+                    **{
+                        label: sum(g["completion_counts"].get(label, 0) for g in subset)
+                        for label in (
+                            "manual_completed",
+                            "automatic_unique",
+                            "default_skipped",
+                            "multiple_candidates",
+                            "unknown_pending",
+                        )
+                    },
                 }
             self._catalogue = {
                 "version": VERSION,
                 "revision": self.state["revision"],
                 "phase": self.state["phase"],
+                "defaults_version": self.state.get("defaults_version", "legacy"),
+                "default_excluded_series": sum(
+                    self.default_excluded(u) for u in self.index.records
+                ),
                 "subjects": len(self.index.subjects),
                 "groups": groups,
                 "counts": counts,
@@ -405,6 +533,11 @@ class Identification:
                     if scope["modality"] == entry["modality"] and f in scope["templates"]:
                         raise ConflictError("该模板已有同模态排除规则；请先撤回排除再确认识别")
                 state["templates"][f] = entry
+                prior = self.state.get("templates", {}).get(f, {})
+                if prior.get("modality") and prior["modality"] != entry["modality"]:
+                    self.clear_completion(
+                        state, {self.index.records[u].subject_id for u in self.members[f]}
+                    )
         affected = {
             self.index.records[u].subject_id
             for f, e in edits.items()
@@ -414,6 +547,24 @@ class Identification:
         affected |= negative_affected
         if payload.get("absent"):
             affected.add(subject)
+        self.clear_completion(state, affected, (group["modality"],))
+        # Explicit identification resolves a forced recheck only for the reviewed target/items.
+        resolved = set(edits) | set(negative_ids)
+        for owner in affected:
+            key = f"{owner}:{group['modality']}"
+            hold = state.get("recheck", {}).get(key)
+            if not hold:
+                continue
+            if winners or (payload.get("absent") and owner == subject):
+                state["recheck"].pop(key)
+            else:
+                remaining = [
+                    u for u in hold.get("candidates", []) if self.families.get(u) not in resolved
+                ]
+                if remaining:
+                    hold["candidates"] = remaining
+                else:
+                    state["recheck"].pop(key)
         conflicts = list(negative_conflicts)
         for f, entry in edits.items():
             if entry["modality"] == "other":
@@ -474,6 +625,7 @@ class Identification:
             raise ConflictError("存在人工分类冲突；原人工决定保留，请先核对冲突病例")
         if not str(payload.get("reviewer", "")).strip():
             raise ValueError("请填写审核者")
+        self.retain_manual_completions(result["state"], self._groups(result["state"]))
         self._save(
             result["state"],
             "publish",
@@ -541,6 +693,21 @@ class Identification:
         self._save(state, "transition", payload)
         return self.summary()
 
+    def review_rules(self, filters):
+        from .qc_rule_review import list_rules
+
+        return list_rules(self, filters)
+
+    def revoke_preview(self, payload):
+        from .qc_rule_review import revoke_preview
+
+        return revoke_preview(self, payload)
+
+    def revoke_publish(self, payload):
+        from .qc_rule_review import revoke_publish
+
+        return revoke_publish(self, payload)
+
     def require_current_inventory(self):
         if inventory_stamp(self.root) != self.loaded_inventory_stamp:
             raise ConflictError("清单在本次会话中发生变化，请重启阅片器或重新运行 catalog")
@@ -549,6 +716,7 @@ class Identification:
         state = dict(
             state,
             revision=self.state.get("revision", 0) + 1,
+            parent_revision=self.state.get("revision", 0),
             saved_at=utc_now(),
             inventory_stamp=inventory_stamp(self.root),
         )

@@ -44,7 +44,6 @@ def test_flair_name_and_timing_classification(record_factory) -> None:
         "202106281256__MR__0702__eFLAIR-longTR-CLEAR",
         "3D_FLAIR",
         "T2-FLAIR",
-        "T1-FLAIR",
     ],
 )
 def test_flair_keyword_is_recognized_anywhere(record_factory, description) -> None:

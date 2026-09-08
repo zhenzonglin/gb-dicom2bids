@@ -483,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
                     identification = index.identification or Identification(index)
                     index.identification = identification
                     catalogue = identification.enable()
+                    review = identification.review_rules({})
                     atomic_write_json(root / "identification_catalogue.json", catalogue)
                     labels = Counter()
                     for s in index.subjects:
@@ -495,6 +496,7 @@ def main(argv: list[str] | None = None) -> int:
                         "groups": len(catalogue["groups"]),
                         "needs_protocol": sum(g["needs_protocol"] for g in catalogue["groups"]),
                         "human_ratings": dict(labels),
+                        "active_identification_rules": review["total"],
                         "identification": identification.summary(),
                     }
                 elif args.command in {"finish-identification", "reopen-identification"}:

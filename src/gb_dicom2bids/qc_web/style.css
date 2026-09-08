@@ -11,3 +11,6 @@
 .identifying #auto-status,.identifying #reason-filter,.identifying #protocol,.identifying .checks label:has(#pilot),.identifying .checks label:has(#pending){display:none}
 #workflow{border:1px solid var(--accent);padding:10px 14px;margin-bottom:12px;background:#19302a}
 #workflow-status{line-height:1.8;margin:0 0 8px}.protocol-row select{max-width:65%}
+#rule-review{width:min(1100px,95vw);max-height:90vh;overflow:auto;background:var(--panel);color:var(--ink);border:1px solid var(--accent);border-radius:8px;padding:20px}
+#rule-review::backdrop{background:#000a}.rule-toolbar,.rule-filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}.rule-toolbar h2{flex:1;margin:0}.rule-filters input{width:160px}#rule-reviewer{width:130px}
+.rule-row{padding:12px 0;border-top:1px solid var(--edge)}.rule-row label{display:block;overflow-wrap:anywhere}.rule-row small{display:block;color:var(--muted);margin:7px 0}.rule-row details{padding-left:0}#rule-status{color:var(--accent)}#rule-report{max-height:260px}

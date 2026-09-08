@@ -29,9 +29,16 @@ independent acceptance audits. Start with `python qc_assist.py catalog --config 
 The workflow now separates sequence identification from image quality: identify T1/FLAIR
 protocols first, then explicitly enter quality review. Other sequences are optional correction
 sources, not required grouping fields. Existing human QC is preserved.
+Names containing both `t1` and `flair`, in either order and with arbitrary intervening text,
+default to T1. Other FLAIR names default to FLAIR. CT, TOF, MRA, DWI, b0 and b1000 default to
+non-target, but remain available for manual correction. Existing human decisions take priority.
+Only a single image candidate per target modality can finish identification automatically;
+this never grants image quality. The persistent rule-review panel can preview and revoke current
+inclusion, exclusion, absence and recheck rules without undoing image-quality decisions or BIDS.
 Sequence identification needs no free-text justification. After a human confirms a round's
 templates are not the target modality, a frozen group reuses that negative evidence and shows
-only new templates. Failed/deferred items remain pending; exclusions can be viewed and revoked.
+only new templates. Manually deferred items remain pending. Preview failures alone never exclude
+an image; a deliberate sequence-only exclusion can still be published. Exclusions remain reversible.
 Rules never copy quality labels. Automatic acceptance is disabled until its independent audit
 passes; manual decisions take precedence and BIDS installation still requires explicit apply.
 

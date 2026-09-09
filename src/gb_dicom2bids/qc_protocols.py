@@ -191,11 +191,20 @@ class ProtocolIndex:
             ]
             best = min((values[u]["priority"] for u in candidates), default=100)
             winners = [u for u in candidates if values[u]["priority"] == best]
+            preference = []
+            if self.identification and rule is None and modality == "t1":
+                preference = self.identification.preferred_t1(
+                    subject, self.identification.state, values
+                )
+                if preference:
+                    winners = preference
             result[modality] = {
                 "choice": winners[0] if len(winners) == 1 else None,
                 "count": len(candidates),
                 "top_count": len(winners),
             }
+            if preference:
+                result[modality]["selection_reason"] = "t1_tra_over_sag"
         return result
 
     def conflicts(self, gid: str, rule: dict | None = None) -> list[dict]:

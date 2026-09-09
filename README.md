@@ -32,8 +32,10 @@ sources, not required grouping fields. Existing human QC is preserved.
 Names containing both `t1` and `flair`, in either order and with arbitrary intervening text,
 default to T1. Other FLAIR names default to FLAIR. CT, TOF, MRA, DWI, b0 and b1000 default to
 non-target, but remain available for manual correction. Existing human decisions take priority.
-Only a single image candidate per target modality can finish identification automatically;
-this never grants image quality. The persistent rule-review panel can preview and revoke current
+Only a unique candidate can finish identification automatically, with one protocol preference:
+an untouched T1 SAG/TRA combination prefers a unique TRA image. SAG remains a T1 alternative;
+multiple TRA images or an additional unresolved T1 protocol still require comparison.
+This never grants image quality. The persistent rule-review panel can preview and revoke current
 inclusion, exclusion, absence and recheck rules without undoing image-quality decisions or BIDS.
 Sequence identification needs no free-text justification. After a human confirms a round's
 templates are not the target modality, a frozen group reuses that negative evidence and shows

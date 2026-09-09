@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 
 from nibabel.filebasedimages import ImageFileError
 
-from .classify import CLASSIFICATION_VERSION, default_classification
+from .classify import CLASSIFICATION_VERSION, default_classification, named_t1_plane
 from .qc_exclusions import ExclusionView
 from .qc_images import check_image
 from .qc_protocols import explicit, fingerprint, normalize_name
@@ -67,6 +67,7 @@ class Identification:
         self._exclusions = None
         self._readable = {}
         self.defaults = {u: default_classification(r) for u, r in index.records.items()}
+        self.name_planes = {u: named_t1_plane(r) for u, r in index.records.items()}
         self._subject_stamps = {}
         self._review_cache = None
         # Read only the sparse error directory, never probe every source image.
@@ -111,9 +112,44 @@ class Identification:
         self._review_cache = None
 
     def defaults_enabled(self, state=None):
-        return (self.state if state is None else state).get(
-            "defaults_version"
-        ) == CLASSIFICATION_VERSION
+        return (self.state if state is None else state).get("defaults_version") in {
+            "sequence-defaults-2",
+            CLASSIFICATION_VERSION,
+        }
+
+    def preferred_t1(self, subject: str, state: dict, values: dict | None = None) -> list[str]:
+        """Choose the TRA pool only for an untouched, unambiguous SAG/TRA combination."""
+        if state.get("defaults_version") != CLASSIFICATION_VERSION:
+            return []
+        decision = self.index.decisions[subject]
+        key = f"{subject}:t1"
+        manual = decision.get("groups", {}).get("t1", {})
+        if manual.get("choice") or manual.get("none") or key in state.get("recheck", {}):
+            return []
+        if key in state.get("absent", {}):
+            return []
+        values = (
+            values
+            if values is not None
+            else {u: self.assignment(u, state) for u in self.index.subjects[subject]}
+        )
+        candidates = [
+            u
+            for u, a in values.items()
+            if a["modality"] == "t1" and "t1" not in a.get("excluded_modalities", [])
+        ]
+        _, scope = self.exclusions(state).scope(subject, "t1")
+        if any(
+            values[u]["classification_source"] != "default"
+            or u in scope.get("deferred", [])
+            or u in self.failed_previews
+            or self.families[u] in scope.get("templates", {})
+            for u in candidates
+        ):
+            return []
+        if {self.name_planes[u] for u in candidates} != {"sag", "tra"}:
+            return []
+        return [u for u in candidates if self.name_planes[u] == "tra"]
 
     def subject_stamp(self, subject):
         if subject not in self._subject_stamps:
@@ -187,7 +223,7 @@ class Identification:
                 "enable",
             )
         else:
-            if not self.defaults_enabled():
+            if self.state.get("defaults_version") != CLASSIFICATION_VERSION:
                 state = copy.deepcopy(self.state)
                 backup = (
                     self.root / "identification_backups" / f"defaults-{state['revision']:09d}.json"
@@ -242,12 +278,13 @@ class Identification:
         exclusions = self.exclusions(state)
         for subject, uids in sorted(self.index.subjects.items()):
             center = self.index.records[uids[0]].center
+            values = {u: self.assignment(u, state) for u in uids}
+            preferred_t1 = self.preferred_t1(subject, state, values)
             for modality in ("t1", "flair"):
                 candidates = [
                     u
                     for u in uids
-                    if self.assignment(u, state)["modality"] == modality
-                    and not exclusions.excluded(u, modality)
+                    if values[u]["modality"] == modality and not exclusions.excluded(u, modality)
                 ]
                 families = sorted({self.families[u] for u in candidates})
                 sid, scope = exclusions.scope(subject, modality)
@@ -277,6 +314,8 @@ class Identification:
                     self.assignment(u, state)["default_classification"]["confidence"] == "high"
                     for u in candidates
                 )
+                if modality == "t1" and preferred_t1:
+                    automatic = len(preferred_t1) == 1
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
                 remaining = exclusions.round(subject, modality)
                 negative_done = bool(scope) and not remaining
@@ -351,6 +390,13 @@ class Identification:
                     }
                 )
             group.update(exclusions.annotations(group))
+            preferred = (
+                self.preferred_t1(group["representative"], state)
+                if group["modality"] == "t1"
+                else []
+            )
+            preferred_families = {self.families[u] for u in preferred}
+            group["default_selection_reason"] = "t1_tra_over_sag" if preferred else ""
             group["templates"] = []
             for family in group["families"]:
                 sample = self.index.records[self.members[family][0]]
@@ -361,7 +407,9 @@ class Identification:
                         "name": self.names[family],
                         "example_name": sample.series_description,
                         "modality": value.get("modality", group["modality"]),
-                        "priority": value.get("priority", 100),
+                        "priority": value.get(
+                            "priority", 0 if family in preferred_families else 100
+                        ),
                         "geometry_variants": len(
                             {self.index.templates[u]["id"] for u in self.members[family]}
                         ),

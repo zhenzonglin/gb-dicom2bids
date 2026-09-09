@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-2"
+CLASSIFICATION_VERSION = "sequence-defaults-3"
 
 T1_KEYWORDS = (
     "t1",
@@ -42,6 +42,25 @@ def compact_text(*values: str) -> str:
     """Normalize names for case-insensitive substring classification."""
     text = " ".join(value or "" for value in values).lower()
     return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def named_t1_plane(record: SeriesRecord) -> str | None:
+    """Protocol-name hint only, never evidence of physical acquisition orientation."""
+    hints = set()
+    for value in (record.series_description, record.protocol_name, record.sequence_name):
+        name = unicodedata.normalize("NFKC", value or "").lower()
+        # Exported PosDisp suffixes describe another positioning/reference series.
+        name = name.split("posdisp", 1)[0]
+        if "t1" not in compact_text(name):
+            continue
+        name = re.sub(r"t1w?", "t1 ", name)
+        for plane, pattern in (
+            ("sag", r"(?<![a-z])sag(?:ittal)?(?![a-z])"),
+            ("tra", r"(?<![a-z])tra(?:nsverse)?(?![a-z])"),
+        ):
+            if re.search(pattern, name):
+                hints.add(plane)
+    return next(iter(hints)) if len(hints) == 1 else None
 
 
 def default_classification(record: SeriesRecord) -> dict:

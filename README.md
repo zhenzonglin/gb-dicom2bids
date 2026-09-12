@@ -30,7 +30,8 @@ The workflow now separates sequence identification from image quality: identify 
 protocols first, then explicitly enter quality review. Other sequences are optional correction
 sources, not required grouping fields. Existing human QC is preserved.
 Names containing both `t1` and `flair`, in either order and with arbitrary intervening text,
-default to T1. Other FLAIR names default to FLAIR. CT, TOF, MRA, DWI, b0 and b1000 default to
+default to T1. Other FLAIR names default to FLAIR. XA (DSA in this project's exclusion category),
+CT, TOF, MRA, DWI, b0 and b1000 default to
 non-target, but remain available for manual correction. Existing human decisions take priority.
 Only a unique candidate can finish identification automatically, with one protocol preference:
 an untouched T1 SAG/TRA combination prefers a unique TRA image. SAG remains a T1 alternative;

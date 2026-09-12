@@ -114,12 +114,13 @@ class Identification:
     def defaults_enabled(self, state=None):
         return (self.state if state is None else state).get("defaults_version") in {
             "sequence-defaults-2",
+            "sequence-defaults-3",
             CLASSIFICATION_VERSION,
         }
 
     def preferred_t1(self, subject: str, state: dict, values: dict | None = None) -> list[str]:
         """Choose the TRA pool only for an untouched, unambiguous SAG/TRA combination."""
-        if state.get("defaults_version") != CLASSIFICATION_VERSION:
+        if state.get("defaults_version") not in {"sequence-defaults-3", CLASSIFICATION_VERSION}:
             return []
         decision = self.index.decisions[subject]
         key = f"{subject}:t1"

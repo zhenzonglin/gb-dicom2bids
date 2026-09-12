@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-3"
+CLASSIFICATION_VERSION = "sequence-defaults-4"
 
 T1_KEYWORDS = (
     "t1",
@@ -72,7 +72,9 @@ def default_classification(record: SeriesRecord) -> dict:
     compact = [compact_text(name) for name in names]
     tokens = [normalized_text(name) for name in names]
     modality, confidence, reason, excluded = "other", "low", "unrecognized", False
+    source_modality = unicodedata.normalize("NFKC", record.modality or "").strip().upper()
     non_target = (
+        ("xa_dsa", r"(?<![a-z0-9])xa(?![a-z0-9])"),
         ("ct", r"(?<![a-z0-9])ct(?![a-z0-9])"),
         ("tof", r"(?<![a-z0-9])(?:[23]d[ _-]*)?tof(?:[ _-]*[23]d)?(?![a-z0-9])"),
         ("mra", r"(?<![a-z0-9])(?:[23]d[ _-]*)?mra\d*(?![a-z0-9])"),
@@ -80,16 +82,16 @@ def default_classification(record: SeriesRecord) -> dict:
         ("b0", r"(?<![a-z0-9])(?:[esd])?b[ _-]*0(?![a-z0-9])"),
         ("b1000", r"(?<![a-z0-9])(?:[esd])?b[ _-]*1000(?![a-z0-9])"),
     )
-    hit = next(
+    hit = {"XA": "xa_dsa", "CT": "ct"}.get(source_modality) or next(
         (label for label, regex in non_target if any(re.search(regex, n) for n in names)), None
     )
     # Preserve existing localizer/projection guards, without combining two names.
     projection = any(t in name for name in tokens for t in EXCLUDED_TOKENS) or any(
         token in normalized_text(*record.image_type) for token in EXCLUDED_TOKENS
     )
-    if record.modality.upper() != "MR" or hit or projection:
+    if source_modality != "MR" or hit or projection:
         excluded, confidence = True, "high"
-        reason = "non_target_" + (hit or ("projection" if projection else record.modality.lower()))
+        reason = "non_target_" + (hit or ("projection" if projection else source_modality.lower()))
     elif any("t1" in name and "flair" in name for name in compact):
         modality, confidence, reason = "t1", "high", "name_t1_and_flair"
     elif any(k in name for name in compact for k in FLAIR_KEYWORDS):
@@ -105,6 +107,7 @@ def default_classification(record: SeriesRecord) -> dict:
         "confidence": confidence,
         "reason": reason,
         "excluded": excluded,
+        "non_target_type": {"xa_dsa": "DSA", "ct": "CT"}.get(hit, ""),
         "version": CLASSIFICATION_VERSION,
     }
 

@@ -18,6 +18,8 @@ from .qc_state import BusyError, ConflictError, assert_pipeline_idle, file_lock,
 
 
 def handler_class(service: ReviewService, token: str):
+    publisher = service.identification_jobs()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format, *args) -> None:
             # URLs and candidate identifiers are private, not console access logs.
@@ -82,6 +84,7 @@ def handler_class(service: ReviewService, token: str):
                     "/assist.js",
                     "/identify.js",
                     "/rules.js",
+                    "/identify_jobs.js",
                     "/style.css",
                 }:
                     self.send(
@@ -91,6 +94,8 @@ def handler_class(service: ReviewService, token: str):
                     )
                 elif url.path == "/api/subjects":
                     self.json_response(200, service.list_subjects(query))
+                elif url.path == "/api/identify/jobs":
+                    self.json_response(200, publisher.status())
                 elif url.path == "/api/subject":
                     self.json_response(200, service.subject(query.get("id", "")))
                 elif url.path == "/api/identify/rules":
@@ -105,17 +110,19 @@ def handler_class(service: ReviewService, token: str):
                     if not (service.root / "assist/identification.json").exists():
                         self.json_response(200, {"enabled": False})
                     else:
-                        identify = service.assistance().identification
-                        self.json_response(
-                            200,
-                            {
+                        with service.lock:
+                            identify = service.assistance().identification
+                            result = {
                                 "enabled": True,
                                 **identify.summary(),
                                 "group": identify.group(query["group"])
                                 if query.get("group")
                                 else None,
-                            },
-                        )
+                                "basis": identify.edit_basis(query["group"])
+                                if query.get("group")
+                                else None,
+                            }
+                        self.json_response(200, result)
                 elif url.path == "/api/assist":
                     from .runtime import read_json
 
@@ -182,7 +189,9 @@ def handler_class(service: ReviewService, token: str):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError("object body required")
-                if self.path == "/api/prepare":
+                if self.path == "/api/identify/submit":
+                    self.json_response(202, publisher.submit(body))
+                elif self.path == "/api/prepare":
                     self.json_response(
                         200, service.prepare(str(body.get("id", "")), body.get("retry") is True)
                     )

@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 
 from nibabel.filebasedimages import ImageFileError
 
-from .classify import CLASSIFICATION_VERSION, default_classification, named_t1_plane
+from .classify import CLASSIFICATION_VERSION, default_classification, named_target_plane
 from .qc_exclusions import ExclusionView
 from .qc_images import check_image
 from .qc_protocols import explicit, fingerprint, normalize_name
@@ -35,6 +35,9 @@ def inventory_stamp(root):
 
 
 def require_quality(root):
+    from .qc_jobs import assert_no_pending
+
+    assert_no_pending(root)
     state = read_json(state_path(root))
     if state and state.get("phase") != "quality":
         raise ValueError("请先完成序列识别，再点击进入质量检查；当前不能保存质量、计算质量或归档")
@@ -72,7 +75,9 @@ class Identification:
         self._exclusions = None
         self._readable = {}
         self.defaults = {u: default_classification(r) for u, r in index.records.items()}
-        self.name_planes = {u: named_t1_plane(r) for u, r in index.records.items()}
+        self.name_planes = {u: named_target_plane(r, "t1") for u, r in index.records.items()}
+        self.flair_planes = {u: named_target_plane(r, "flair") for u, r in index.records.items()}
+        self._edit_bases = {}
         self._subject_stamps = {}
         self._review_cache = None
         self._unreadable_groups = {}
@@ -216,21 +221,32 @@ class Identification:
         self._unreadable_state = None
         self._candidate_limits = {}
         self._candidate_limit_state = None
+        self._edit_bases = {}
 
     def defaults_enabled(self, state=None):
         return (self.state if state is None else state).get("defaults_version") in {
             "sequence-defaults-2",
             "sequence-defaults-3",
+            "sequence-defaults-4",
             CLASSIFICATION_VERSION,
         }
 
     def preferred_t1(self, subject: str, state: dict, values: dict | None = None) -> list[str]:
+        return self.preferred_axial(subject, "t1", state, values)
+
+    def preferred_axial(
+        self, subject: str, modality: str, state: dict, values: dict | None = None
+    ) -> list[str]:
         """Choose the TRA pool only for an untouched, unambiguous SAG/TRA combination."""
-        if state.get("defaults_version") not in {"sequence-defaults-3", CLASSIFICATION_VERSION}:
+        if state.get("defaults_version") not in {
+            "sequence-defaults-3",
+            "sequence-defaults-4",
+            CLASSIFICATION_VERSION,
+        } or (modality == "flair" and state.get("defaults_version") != CLASSIFICATION_VERSION):
             return []
         decision = self.index.decisions[subject]
-        key = f"{subject}:t1"
-        manual = decision.get("groups", {}).get("t1", {})
+        key = f"{subject}:{modality}"
+        manual = decision.get("groups", {}).get(modality, {})
         if manual.get("choice") or manual.get("none") or key in state.get("recheck", {}):
             return []
         if key in state.get("absent", {}):
@@ -243,9 +259,9 @@ class Identification:
         candidates = [
             u
             for u, a in values.items()
-            if a["modality"] == "t1" and "t1" not in a.get("excluded_modalities", [])
+            if a["modality"] == modality and modality not in a.get("excluded_modalities", [])
         ]
-        _, scope = self.exclusions(state).scope(subject, "t1")
+        _, scope = self.exclusions(state).scope(subject, modality)
         if any(
             values[u]["classification_source"] != "default"
             or u in scope.get("deferred", [])
@@ -254,9 +270,10 @@ class Identification:
             for u in candidates
         ):
             return []
-        if {self.name_planes[u] for u in candidates} != {"sag", "tra"}:
+        planes = self.name_planes if modality == "t1" else self.flair_planes
+        if {planes[u] for u in candidates} != {"sag", "tra"}:
             return []
-        return [u for u in candidates if self.name_planes[u] == "tra"]
+        return [u for u in candidates if planes[u] == "tra"]
 
     def subject_stamp(self, subject):
         if subject not in self._subject_stamps:
@@ -424,8 +441,8 @@ class Identification:
         for subject, uids in sorted(self.index.subjects.items()):
             center = self.index.records[uids[0]].center
             values = {u: self.assignment(u, state) for u in uids}
-            preferred_t1 = self.preferred_t1(subject, state, values)
             for modality in ("t1", "flair"):
+                preferred_axial = self.preferred_axial(subject, modality, state, values)
                 candidates = [
                     u
                     for u in uids
@@ -466,8 +483,8 @@ class Identification:
                     self.assignment(u, state)["default_classification"]["confidence"] == "high"
                     for u in candidates
                 )
-                if modality == "t1" and preferred_t1:
-                    automatic = len(preferred_t1) == 1
+                if preferred_axial:
+                    automatic = len(preferred_axial) == 1
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
                 remaining = exclusions.round(subject, modality)
                 negative_done = bool(scope) and not exclusions.round(
@@ -552,13 +569,11 @@ class Identification:
                     }
                 )
             group.update(exclusions.annotations(group))
-            preferred = (
-                self.preferred_t1(group["representative"], state)
-                if group["modality"] == "t1"
-                else []
-            )
+            preferred = self.preferred_axial(group["representative"], group["modality"], state)
             preferred_families = {self.families[u] for u in preferred}
-            group["default_selection_reason"] = "t1_tra_over_sag" if preferred else ""
+            group["default_selection_reason"] = (
+                f"{group['modality']}_tra_over_sag" if preferred else ""
+            )
             group["templates"] = []
             for family in group["families"]:
                 sample = self.index.records[self.members[family][0]]
@@ -642,6 +657,42 @@ class Identification:
 
     def subject_groups(self, subject):
         return [g for g in self.catalogue()["groups"] if subject in g["subjects"]]
+
+    def edit_basis(self, gid: str) -> str:
+        """Scope-specific optimistic guard for a decision viewed before another job finishes."""
+        if gid not in self._edit_bases:
+            group = self.group(gid)
+            subjects = set(group["subjects"])
+            families = {self.families[u] for s in subjects for u in self.index.subjects[s]}
+            # Template values are global. Publication separately checks image-level
+            # conflicts in every affected member, including other candidate combinations.
+            state = self.state
+            self._edit_bases[gid] = fingerprint(
+                {
+                    "inventory": self.loaded_inventory_stamp,
+                    "members": group["subjects"],
+                    "families": group["families"],
+                    "phase": state["phase"],
+                    "defaults": state.get("defaults_version"),
+                    "limit": state.get("candidate_limit_version"),
+                    "templates": {f: state.get("templates", {}).get(f) for f in sorted(families)},
+                    "scopes": {
+                        k: v
+                        for k, v in state.get("negative_scopes", {}).items()
+                        if set(v["subjects"]) & subjects
+                    },
+                    "decisions": {s: self.index.decisions[s] for s in sorted(subjects)},
+                    "holds": {
+                        name: {
+                            k: v
+                            for k, v in state.get(name, {}).items()
+                            if k.rsplit(":", 1)[0] in subjects
+                        }
+                        for name in ("absent", "recheck", "manual_completed")
+                    },
+                }
+            )
+        return self._edit_bases[gid]
 
     def list_subjects(self, filters):
         groups = self.catalogue()["groups"]
@@ -932,6 +983,10 @@ class Identification:
         target = payload.get("phase")
         if target not in {"identification", "quality"}:
             raise ValueError("unknown workflow stage")
+        if target == "quality":
+            from .qc_jobs import assert_no_pending
+
+            assert_no_pending(self.root)
         self.invalidate()
         if target == "quality" and self.catalogue()["pending_groups"]:
             raise ValueError("仍有待识别组；先完成序列识别，再进入质量检查")

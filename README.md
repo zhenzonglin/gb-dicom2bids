@@ -30,7 +30,9 @@ The workflow now separates sequence identification from image quality: identify 
 protocols first, then explicitly enter quality review. Other sequences are optional correction
 sources, not required grouping fields. Existing human QC is preserved.
 Names containing both `t1` and `flair`, in either order and with arbitrary intervening text,
-default to T1. Other FLAIR names default to FLAIR. XA (DSA in this project's exclusion category),
+default to T1. Other FLAIR names default to FLAIR. A single name containing `t2`, `dark` and
+`fluid`, with intervening text allowed and in any order, also defaults to FLAIR; separate names
+are never joined to construct a match. XA (DSA in this project's exclusion category),
 CT, TOF, MRA, DWI, b0 and b1000 default to
 non-target, but remain available for manual correction. Existing human decisions take priority.
 If every remaining candidate in a patient's modality-specific round has a verified image-read
@@ -38,8 +40,10 @@ failure, that round is technically skipped. Untried files, temporary I/O failure
 holds do not qualify. The recovery queue retains all images and logs for retry; no quality
 decision or cross-patient exclusion rule is created.
 Only a unique candidate can finish identification automatically, with one protocol preference:
-an untouched T1 SAG/TRA combination prefers a unique TRA image. SAG remains a T1 alternative;
-multiple TRA images or an additional unresolved T1 protocol still require comparison,
+an untouched axial/sagittal combination prefers a unique axial image, independently for T1 and
+FLAIR. OAx/TRA name hints are axial and OSag/SAG hints sagittal, with intervening text allowed.
+Sagittal images remain alternatives; multiple axial images or an additional unresolved target
+protocol still require comparison,
 unless one normalized name field has **four or more candidate images in that patient**.
 At this fixed, inclusive limit, only the triggering modality is skipped, including its other
 fields; the other modality remains independent. Different fields and patients are not summed.
@@ -48,7 +52,12 @@ The viewer's count-exclusion queue shows the field and count without automatical
 Run `catalog` after updating to enable this rule and back up the prior private identification state.
 This never grants image quality. The persistent rule-review panel can preview and revoke current
 inclusion, exclusion, absence and recheck rules without undoing image-quality decisions or BIDS.
-Sequence identification needs no free-text justification. After a human confirms a round's
+Sequence identification needs no free-text justification or separate preview click. Direct
+confirmation durably queues the request and opens the next group while serial saving continues.
+The status panel distinguishes pending, saved and failed requests; failures can return to their
+group for review. Queued requests survive restart; conflicting edits cannot overwrite current
+rules. Quality/archiving remains blocked until all pending requests finish.
+After a human confirms a round's
 templates are not the target modality, a frozen group reuses that negative evidence and shows
 only new templates. Manually deferred items remain pending. Preview failures alone never exclude
 an image; a deliberate sequence-only exclusion can still be published. Exclusions remain reversible.

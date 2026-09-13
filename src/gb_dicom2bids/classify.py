@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-4"
+CLASSIFICATION_VERSION = "sequence-defaults-5"
 
 T1_KEYWORDS = (
     "t1",
@@ -45,18 +45,30 @@ def compact_text(*values: str) -> str:
 
 
 def named_t1_plane(record: SeriesRecord) -> str | None:
+    return named_target_plane(record, "t1")
+
+
+def named_target_plane(record: SeriesRecord, modality: str) -> str | None:
     """Protocol-name hint only, never evidence of physical acquisition orientation."""
     hints = set()
     for value in (record.series_description, record.protocol_name, record.sequence_name):
         name = unicodedata.normalize("NFKC", value or "").lower()
         # Exported PosDisp suffixes describe another positioning/reference series.
         name = name.split("posdisp", 1)[0]
-        if "t1" not in compact_text(name):
+        compact = compact_text(name)
+        target = (
+            any(k in compact for k in T1_KEYWORDS)
+            and not ("flair" in compact and "t1" not in compact)
+            if modality == "t1"
+            else (any(k in compact for k in FLAIR_KEYWORDS) or _t2_dark_fluid(compact))
+            and "t1" not in compact
+        )
+        if not target:
             continue
         name = re.sub(r"t1w?", "t1 ", name)
         for plane, pattern in (
-            ("sag", r"(?<![a-z])sag(?:ittal)?(?![a-z])"),
-            ("tra", r"(?<![a-z])tra(?:nsverse)?(?![a-z])"),
+            ("sag", r"(?<![a-z])(?:osag|sag(?:ittal)?)(?![a-z])"),
+            ("tra", r"(?<![a-z])(?:oax|tra(?:nsverse)?)(?![a-z])"),
         ):
             if re.search(pattern, name):
                 hints.add(plane)
@@ -94,6 +106,8 @@ def default_classification(record: SeriesRecord) -> dict:
         reason = "non_target_" + (hit or ("projection" if projection else source_modality.lower()))
     elif any("t1" in name and "flair" in name for name in compact):
         modality, confidence, reason = "t1", "high", "name_t1_and_flair"
+    elif any(_t2_dark_fluid(name) for name in compact):
+        modality, confidence, reason = "flair", "high", "name_t2_dark_fluid"
     elif any(k in name for name in compact for k in FLAIR_KEYWORDS):
         modality, confidence, reason = "flair", "high", "name_flair"
     elif _plausible_flair_timing(record) and not any(
@@ -110,6 +124,11 @@ def default_classification(record: SeriesRecord) -> dict:
         "non_target_type": {"xa_dsa": "DSA", "ct": "CT"}.get(hit, ""),
         "version": CLASSIFICATION_VERSION,
     }
+
+
+def _t2_dark_fluid(compact_name: str) -> bool:
+    # All keywords must occur in ONE name; arbitrary intervening protocol text is allowed.
+    return all(token in compact_name for token in ("t2", "dark", "fluid"))
 
 
 def source_kind(image_type: list[str], description: str, protocol: str) -> str:

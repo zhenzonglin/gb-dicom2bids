@@ -16,7 +16,6 @@ function identificationFailure(id){
   if(!identifying())return;
   // A technical error is not a human decision. Never check or lock a defer box here.
   identificationFailures.add(id);
-  document.querySelector('#identify-publish')?.setAttribute('disabled','');
   const group=current?.identification_groups?.find(g=>g.id===activeIdentificationGroup);
   if(dirty||identificationShowAll||$('#assist-queue').value!=='protocol'||!group?.new_candidate_ids?.length)return;
   if(!group.new_candidate_ids.every(u=>identificationFailures.has(u))||group.new_candidate_ids.some(u=>identificationDeferred.has(u)))return;
@@ -38,6 +37,7 @@ function identificationFailure(id){
 }
 
 function displayWorkflow(value){
+  if(workflow?.enabled&&value.enabled&&value.revision<workflow.revision)return;
   workflow=value;
   document.body.classList.toggle('identifying',identifying());
   $('#workflow').hidden=!value.enabled;
@@ -56,6 +56,7 @@ function displayWorkflow(value){
     option.disabled=identifying()?!sequence:sequence;
   }
   if($('#assist-queue').selectedOptions[0].disabled)$('#assist-queue').value=identifying()?'protocol':'';
+  renderIdentificationJobs();
 }
 
 async function loadWorkflow(signal){
@@ -63,7 +64,7 @@ async function loadWorkflow(signal){
   if(!signal?.aborted)displayWorkflow(value);
 }
 
-async function renderIdentification(){
+async function renderIdentification(snapshot=null){
   const panel=$('#protocol-panel'),content=$('#protocol-content');
   panel.hidden=!identifying();
   content.replaceChildren();
@@ -91,7 +92,7 @@ async function renderIdentification(){
     content.append(element('p','保留原始模态、文件和错误日志；未写入质量不通过。下方展示全部序列，可切换候选并重试预览。重试成功后恢复识别；不会把本例错误传播到其他患者。'));
     renderPanes();return;
   }
-  const data=await api('/api/identify?group='+encodeURIComponent(group.id));
+  const data=snapshot||await api('/api/identify?group='+encodeURIComponent(group.id));
   if(activeIdentificationGroup!==group.id)return;
   displayWorkflow(data);group=data.group;
   const slot=current.identification_groups.findIndex(g=>g.id===group.id);
@@ -102,7 +103,7 @@ async function renderIdentification(){
   content.append(element('h3',`${target} 序列识别 · 同类 ${group.count} 人 · 待识别 ${group.pending_count} 人`));
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
   content.append(element('p',`有效 ${target} 候选归属明确、无目标候选冲突或待定时，该患者结束 ${target} 识别；无需继续排除无关序列。`,'hint'));
-  content.append(element('p',`保留 ${target}、仅移出部分模板时，请在对应模板的下拉框选择“不是 ${target}（移出候选）”，再预览同类影响；预览失败不阻拦排除，手动勾选待定的模板仍受保护。`,'hint'));
+  content.append(element('p',`保留 ${target}、仅移出部分模板时，请在对应模板下拉框选择“不是 ${target}（移出候选）”，再直接确认应用。提交后进入下一组，后台完成写入；预览影响是可选操作。`,'hint'));
   const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality)&&!c.unreadable_excluded_modalities?.includes(group.modality)&&!c.candidate_limit_excluded_modalities?.includes(group.modality));
   if(excludedTargets.length)content.append(element('p',`以下带 ${target} 标签的序列已被本组排除，不是有效候选：${excludedTargets.map(c=>c.series_description).join('；')}。如需恢复，请展开“已排除模板 / 撤回排除”，撤回对应模板后再加入 ${target} 识别。`,'list-error'));
   content.append(element('p',`本轮新序列 ${group.new_template_count??0} 种 · 累计排除 ${group.excluded_template_count??0} 种 · 自动跳过 ${group.auto_skipped_subjects??0} 人 · 剩余待识别 ${group.pending_count} 人`));
@@ -156,7 +157,7 @@ async function renderIdentification(){
   }
   content.append(reviewList);
   const preview=element('button','预览同类影响'),publish=element('button','确认识别并应用同类'),absent=element('button',`本轮序列均不是 ${target}`);
-  publish.id='identify-publish';publish.disabled=true;
+  publish.id='identify-publish';publish.classList.add('primary');
   content.append(preview,publish,absent);
   const undo=element('details');undo.append(element('summary','已排除模板 / 撤回排除'));
   const revoked=new Set();
@@ -170,13 +171,13 @@ async function renderIdentification(){
   undo.append(revoke);content.append(undo);
   const report=element('pre');content.append(report);
   let payload=null;
-  function invalidate(){payload=null;publish.disabled=true;dirty=true;identificationDraft=true;message('序列规则尚未发布；此操作不保存质量通过。');}
+  function invalidate(){payload=null;publish.disabled=false;dirty=true;identificationDraft=true;message('序列规则尚未提交；可直接确认应用，此操作不保存质量通过。');}
   reviewer.oninput=compare.onchange=invalidate;
-  const makePayload=()=>({group:group.id,subject:current.subject,revision:data.revision,
+  const makePayload=()=>({group:group.id,subject:current.subject,revision:data.revision,basis:data.basis,target_modality:group.modality,
     reviewer:reviewer.value,compare_in_quality:compare.checked,
     templates:Object.fromEntries([...entries].map(([id,e])=>[id,{modality:e.modality,priority:e.priority}]))});
-  async function doPreview(action='positive'){
-    try{payload=makePayload();
+  function buildPayload(action='positive'){
+      payload=makePayload();
       if(action==='positive'){
         // A mixed decision excludes only the explicitly rejected template rows,
         // never every unchecked optional sequence in the current round.
@@ -197,23 +198,22 @@ async function renderIdentification(){
         if(!payload.negative_templates.length&&!payload.deferred_candidates.length)throw Error('本轮没有尚待确认的序列。');
       }
       if(action==='revoke'){payload.templates={};payload.revoke_negative=[...revoked];if(!revoked.size)throw Error('请先勾选要撤回的模板。');}
+      return payload;
+  }
+  async function doPreview(action='positive'){
+    try{payload=buildPayload(action);
       const result=await api('/api/identify/preview',payload);
       const names=(result.negative_templates||[]).map(f=>current.candidates.find(c=>c.family_id===f)?.series_description||f);
       report.textContent=(names.length?'将确认以下模板不是 '+target+'（含未勾选的预览失败项；仅序列排除，不判断质量）：\n'+names.join('\n')+'\n\n':'')+JSON.stringify(result,null,2);payload.preview_digest=result.preview_digest;
       publish.disabled=result.conflicts.length>0;
-    }catch(error){payload=null;publish.disabled=true;message(error.message,true);}
+    }catch(error){payload=null;publish.disabled=false;message(error.message,true);}
   }
-  preview.onclick=()=>doPreview();absent.onclick=()=>doPreview('negative');revoke.onclick=()=>doPreview('revoke');
+  preview.title='可选：不预览也能直接确认应用';
+  preview.onclick=()=>doPreview();absent.onclick=async()=>{
+    try{await queueIdentification(buildPayload('negative'));}catch(error){message(error.message,true);}
+  };revoke.onclick=()=>doPreview('revoke');
   publish.onclick=async()=>{
-    try{if(!payload)return;const result=await api('/api/identify/publish',payload);
-      dirty=false;identificationDraft=null;displayWorkflow({...result,enabled:true});
-      current=null;activeIdentificationGroup=null;clearImages($('#panes'));$('#panes').replaceChildren();
-      $('#protocol-panel').hidden=true;$('#protocol-content').replaceChildren();
-      offset=0;await loadWorkflow();await refreshList(result.next_group);
-      if(result.next_group){const next=await api('/api/identify?group='+encodeURIComponent(result.next_group));
-        if(current?.subject!==next.group.representative||activeIdentificationGroup!==next.group.id)await openSubject(next.group.representative,next.group.id);}
-      message(`序列规则已应用至 ${result.affected_subjects} 人；未写入任何质量通过记录。`);
-    }catch(error){message(error.message,true);}
+    try{await queueIdentification(payload||buildPayload());}catch(error){message(error.message,true);}
   };
   drawRows();
   renderPanes();

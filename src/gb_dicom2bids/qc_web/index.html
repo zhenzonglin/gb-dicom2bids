@@ -20,6 +20,7 @@
 </aside>
 <main><div class="notice">两个展示窗可按文件夹名独立选择序列，再人工指定为T1、FLAIR或其他。每个候选只显示原始NIfTI第三维体素切片，不做轴、冠、矢正交重切或插值，也不据显示方向推断原始采集方向。</div>
 <section id="workflow" hidden><p id="workflow-status"></p><p id="default-summary" class="hint"></p><button id="next-stage"></button></section>
+<section id="identification-jobs" hidden><p id="identification-job-status" role="status"></p><button id="retry-identification-receipt" hidden>重试未确认的提交</button><details><summary>后台任务 / 保存失败</summary><div id="identification-job-details"></div></details></section>
 <details id="protocol-panel" hidden><summary>协议识别与批量复用</summary><div id="protocol-content"></div></details>
 <div id="panes"><section class="empty">从左侧选择受试者，开始并排阅片。</section></div>
 <section id="decision-bar" hidden>
@@ -50,4 +51,4 @@
 <div class="rule-toolbar"><button id="rule-preview">预览撤销影响</button><button id="rule-publish" class="primary" disabled>确认撤销</button></div>
 <pre id="rule-report" aria-live="polite"></pre>
 </dialog>
-<script src="/identify.js"></script><script src="/assist.js"></script><script src="/rules.js"></script><script src="/app.js"></script></body></html>
+<script src="/identify.js"></script><script src="/identify_jobs.js"></script><script src="/assist.js"></script><script src="/rules.js"></script><script src="/app.js"></script></body></html>

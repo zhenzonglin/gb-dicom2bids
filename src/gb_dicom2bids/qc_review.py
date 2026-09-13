@@ -119,6 +119,7 @@ class ReviewService:
         self._times: dict[str, dict[str, str]] = {}
         self._verified: dict[str, tuple] = {}
         self._assist = None
+        self._identification_jobs = None
 
     def warmup(self, progress: StartupProgress) -> None:
         """Finish the expensive first list/identification request before printing the URL."""
@@ -158,8 +159,18 @@ class ReviewService:
             for name in ("catalogue.json", "identification.json")
         )
 
+    def identification_jobs(self):
+        from .qc_jobs import IdentificationJobs
+
+        with self.lock:
+            if self._identification_jobs is None:
+                self._identification_jobs = IdentificationJobs(self)
+            return self._identification_jobs
+
     def close(self) -> None:
         self.stop.set()
+        if self._identification_jobs is not None:
+            self._identification_jobs.close()
         self.executor.shutdown(wait=True, cancel_futures=True)
 
     def require_uid(self, uid: str):

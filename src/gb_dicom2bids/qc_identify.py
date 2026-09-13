@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from collections import Counter, defaultdict
 
 from nibabel.filebasedimages import ImageFileError
 
 from .classify import CLASSIFICATION_VERSION, default_classification, named_target_plane
+from .models import SeriesRecord
 from .qc_exclusions import ExclusionView
 from .qc_images import check_image
 from .qc_protocols import explicit, fingerprint, normalize_name
@@ -32,6 +34,18 @@ def inventory_stamp(root):
         return None
     stat = path.stat()
     return [stat.st_size, stat.st_mtime_ns]
+
+
+def axial_candidate_order(record: SeriesRecord) -> tuple:
+    """Folder first, then filename in natural order; never claim acquisition chronology."""
+    source = min(record.source_relpaths) if record.source_relpaths else record.series_description
+    normalized = unicodedata.normalize("NFKC", source).casefold().replace("\\", "/")
+    parts = tuple(
+        tuple((1, int(s)) if s.isdigit() else (0, s) for s in re.split(r"([0-9]+)", part))
+        for part in normalized.split("/")
+    )
+    # Deterministic tie breakers, independent of inventory iteration order.
+    return parts, source, record.series_uid_hash
 
 
 def require_quality(root):
@@ -228,21 +242,34 @@ class Identification:
             "sequence-defaults-2",
             "sequence-defaults-3",
             "sequence-defaults-4",
+            "sequence-defaults-5",
             CLASSIFICATION_VERSION,
         }
 
     def preferred_t1(self, subject: str, state: dict, values: dict | None = None) -> list[str]:
         return self.preferred_axial(subject, "t1", state, values)
 
+    def axial_selection_reason(self, modality: str, state: dict) -> str:
+        suffix = (
+            "axial_last"
+            if state.get("defaults_version") == CLASSIFICATION_VERSION
+            else "tra_over_sag"
+        )
+        return f"{modality}_{suffix}"
+
     def preferred_axial(
         self, subject: str, modality: str, state: dict, values: dict | None = None
     ) -> list[str]:
-        """Choose the TRA pool only for an untouched, unambiguous SAG/TRA combination."""
+        """Prefer named axial targets without requiring other candidates to be resolved."""
         if state.get("defaults_version") not in {
             "sequence-defaults-3",
             "sequence-defaults-4",
+            "sequence-defaults-5",
             CLASSIFICATION_VERSION,
-        } or (modality == "flair" and state.get("defaults_version") != CLASSIFICATION_VERSION):
+        } or (
+            modality == "flair"
+            and state.get("defaults_version") not in {"sequence-defaults-5", CLASSIFICATION_VERSION}
+        ):
             return []
         decision = self.index.decisions[subject]
         key = f"{subject}:{modality}"
@@ -262,6 +289,27 @@ class Identification:
             if a["modality"] == modality and modality not in a.get("excluded_modalities", [])
         ]
         _, scope = self.exclusions(state).scope(subject, modality)
+        planes = self.name_planes if modality == "t1" else self.flair_planes
+        axial = [u for u in candidates if planes[u] == "tra"]
+        if state.get("defaults_version") == CLASSIFICATION_VERSION:
+            # Keep deliberate human rankings and holds, not automatic candidate guards.
+            if any(
+                state.get("templates", {}).get(self.families[u], {}).get("priority", 100) != 100
+                for u in candidates
+            ):
+                best = min(values[u]["priority"] for u in candidates)
+                axial = [u for u in axial if values[u]["priority"] == best]
+            if any(
+                u in scope.get("deferred", []) or self.families[u] in scope.get("templates", {})
+                for u in axial
+            ):
+                return []
+            return (
+                [max(axial, key=lambda u: axial_candidate_order(self.index.records[u]))]
+                if axial
+                else []
+            )
+        # Historical states retain their previous interpretation until catalog migration.
         if any(
             values[u]["classification_source"] != "default"
             or u in scope.get("deferred", [])
@@ -270,10 +318,9 @@ class Identification:
             for u in candidates
         ):
             return []
-        planes = self.name_planes if modality == "t1" else self.flair_planes
         if {planes[u] for u in candidates} != {"sag", "tra"}:
             return []
-        return [u for u in candidates if planes[u] == "tra"]
+        return axial
 
     def subject_stamp(self, subject):
         if subject not in self._subject_stamps:
@@ -495,15 +542,15 @@ class Identification:
                 # Once target protocols are settled, optional non-target images
                 # cannot keep this participant in the identification queue. Preserve
                 # their saved defers/errors; only target issues still block completion.
-                relevant = candidates if target_identified else remaining
+                relevant = preferred_axial or (candidates if target_identified else remaining)
                 deferred = bool(set(relevant) & set(scope.get("deferred", []))) or bool(
-                    scope and set(relevant) & self.failed_previews
+                    not preferred_axial and scope and set(relevant) & self.failed_previews
                 )
                 recheck = f"{subject}:{modality}" in state.get("recheck", {})
                 conflicted = any(
                     self.families[u] in scope.get("templates", {})
                     and exclusions.positive(u, modality)
-                    for u in uids
+                    for u in (preferred_axial or uids)
                 )
                 if negative_done and subject not in scope.get("reviewed_subjects", []):
                     group["auto_skipped_subjects"] += 1
@@ -572,7 +619,7 @@ class Identification:
             preferred = self.preferred_axial(group["representative"], group["modality"], state)
             preferred_families = {self.families[u] for u in preferred}
             group["default_selection_reason"] = (
-                f"{group['modality']}_tra_over_sag" if preferred else ""
+                self.axial_selection_reason(group["modality"], state) if preferred else ""
             )
             group["templates"] = []
             for family in group["families"]:

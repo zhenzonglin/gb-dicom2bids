@@ -59,12 +59,12 @@ def check(output: Path, channel: str | None) -> None:
                     lambda r: prepares.append(r.url) if r.url.endswith("/api/prepare") else None,
                 )
                 page.goto(url, wait_until="networkidle")
-                expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
-                expect(page.locator("#total")).to_have_text("1")
+                expect(page.locator("#total")).to_have_text("0")
+                expect(page.locator("#next-stage")).to_be_enabled()
                 expect(page.locator("#default-summary")).to_contain_text(
                     "同字段 ≥4 自动跳过 T1 1 / FLAIR 1"
                 )
-                expect(page.locator(".frame img[src]")).to_have_count(2)
+                expect(page.locator(".frame img[src]")).to_have_count(0)
                 initial_prepares = len(prepares)
                 page.locator("#assist-queue").select_option("candidate_limit")
                 expect(page.locator("#total")).to_have_text("2")
@@ -77,11 +77,17 @@ def check(output: Path, channel: str | None) -> None:
                 expect(page.locator("#default-summary")).to_contain_text(
                     "同字段 ≥4 自动跳过 T1 1 / FLAIR 1"
                 )
-                # Identify only the remaining three-candidate field; do not rate its quality.
-                page.get_by_role("button", name="预览同类影响", exact=True).click()
-                publish = page.locator("#identify-publish")
-                expect(publish).to_be_enabled()
-                publish.click()
+                # Three axial images now finish identification without any confirmation.
+                page.locator("#assist-queue").select_option("identified")
+                page.locator("#subjects .subject").filter(has_text="phantom01").first.click()
+                expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
+                selected = service.subject("phantom01")["sequence_choices"]["t1"]
+                assert "__0002__" in service.records[selected].source_relpaths[0]
+                expect(page.locator(".frame img[src]")).to_have_count(2)
+                assert selected in page.locator(".pane-head select").evaluate_all(
+                    "nodes => nodes.map(node => node.value)"
+                )
+                page.screenshot(path=str(output / "axial-last-selected.png"), full_page=True)
                 expect(page.locator("#next-stage")).to_be_enabled()
                 page.locator("#next-stage").click()
                 expect(page.locator("#workflow-status")).to_contain_text("阶段 2")
@@ -107,7 +113,7 @@ def check(output: Path, channel: str | None) -> None:
                         "page_errors": errors,
                         "external_requests": external,
                         "checks": [
-                            "3 remains",
+                            "3 selects last axial without identification review",
                             "4 skips",
                             "modality isolation",
                             "audit queue",

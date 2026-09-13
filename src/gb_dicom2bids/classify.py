@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-5"
+CLASSIFICATION_VERSION = "sequence-defaults-6"
 
 T1_KEYWORDS = (
     "t1",

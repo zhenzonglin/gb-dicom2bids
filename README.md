@@ -39,12 +39,14 @@ If every remaining candidate in a patient's modality-specific round has a verifi
 failure, that round is technically skipped. Untried files, temporary I/O failures and human
 holds do not qualify. The recovery queue retains all images and logs for retry; no quality
 decision or cross-patient exclusion rule is created.
-Only a unique candidate can finish identification automatically, with one protocol preference:
-an untouched axial/sagittal combination prefers a unique axial image, independently for T1 and
-FLAIR. OAx/TRA name hints are axial and OSag/SAG hints sagittal, with intervening text allowed.
-Sagittal images remain alternatives; multiple axial images or an additional unresolved target
-protocol still require comparison,
-unless one normalized name field has **four or more candidate images in that patient**.
+For T1 and FLAIR independently, an available axial candidate finishes sequence identification
+without resolving other candidates first. OAx/TRA name hints are axial and OSag/SAG hints sagittal,
+with intervening text allowed. Multiple axial images are ordered naturally by source folder,
+then filename, and the last one is selected (image10 follows image2). This is deterministic
+ordering, not acquisition chronology or quality ranking. Existing human final choices, explicit
+rankings, exclusions and holds remain authoritative. Other images remain available for correction.
+One normalized name field having **four or more candidate images in that patient** still overrides
+the automatic axial preference.
 At this fixed, inclusive limit, only the triggering modality is skipped, including its other
 fields; the other modality remains independent. Different fields and patients are not summed.
 Saved human final decisions are preserved. This workload exclusion is not a quality failure.

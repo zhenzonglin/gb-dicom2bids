@@ -85,7 +85,7 @@ def test_unique_axial_finishes_only_identification(tmp_path, axial, sag, modalit
 
 
 @pytest.mark.parametrize("count", [2, 3, 4])
-def test_axial_repeats_keep_comparison_or_fixed_limit(tmp_path, count):
+def test_axial_repeats_finish_identification_or_trigger_fixed_limit(tmp_path, count):
     index, identify = make_count_index(
         tmp_path,
         {
@@ -96,6 +96,11 @@ def test_axial_repeats_keep_comparison_or_fixed_limit(tmp_path, count):
             }
         },
     )
-    assert index.choices("phantom01")["t1"]["choice"] is None
+    choice = index.choices("phantom01")["t1"]["choice"]
+    if count < 4:
+        assert index.records[choice].source_relpaths[0].endswith(f"image{count-1}.nii.gz")
+    else:
+        assert choice is None
     assert identify.summary()["counts"]["t1"]["candidate_limit_skipped"] == int(count >= 4)
-    assert identify.summary()["counts"]["t1"]["pending_subjects"] == int(count < 4)
+    assert identify.summary()["counts"]["t1"]["pending_subjects"] == 0
+    assert identify.summary()["counts"]["t1"]["automatic_unique"] == int(count < 4)

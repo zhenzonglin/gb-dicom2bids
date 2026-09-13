@@ -204,7 +204,9 @@ class ProtocolIndex:
                 "top_count": len(winners),
             }
             if preference:
-                result[modality]["selection_reason"] = f"{modality}_tra_over_sag"
+                result[modality]["selection_reason"] = self.identification.axial_selection_reason(
+                    modality, self.identification.state
+                )
         return result
 
     def conflicts(self, gid: str, rule: dict | None = None) -> list[dict]:

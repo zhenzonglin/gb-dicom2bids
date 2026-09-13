@@ -65,7 +65,10 @@ def test_fixed_inclusive_threshold_all_target_fields(tmp_path, name, modality, c
     else:
         assert not limits
         assert index.choices("phantom01")[modality]["count"] == 3
-        assert stats[modality]["pending_subjects"] == 1
+        assert stats[modality]["pending_subjects"] == int(name != "T1 tra")
+        if name == "T1 tra":
+            selected = index.choices("phantom01")[modality]["choice"]
+            assert index.records[selected].source_relpaths[0].endswith("image2.nii.gz")
 
 
 def test_no_cross_field_or_patient_sum_and_no_slice_count(tmp_path, monkeypatch):

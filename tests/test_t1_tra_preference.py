@@ -69,9 +69,9 @@ def test_unique_tra_finishes_identification_preserving_sag_and_source(tmp_path):
         choices = index.choices(subject)["t1"]
         assert choices["count"] == 2 and choices["top_count"] == 1
         assert identify.name_planes[choices["choice"]] == "tra"
-        assert choices["selection_reason"] == "t1_tra_over_sag"
+        assert choices["selection_reason"] == "t1_axial_last"
         group = next(g for g in identify.subject_groups(subject) if g["modality"] == "t1")
-        assert group["default_selection_reason"] == "t1_tra_over_sag"
+        assert group["default_selection_reason"] == "t1_axial_last"
         assert sorted(t["priority"] for t in group["templates"]) == [0, 100]
         assert all(
             index.assignment(u)["modality"] == "t1"
@@ -103,10 +103,12 @@ def test_unique_tra_finishes_identification_preserving_sag_and_source(tmp_path):
         ["T1 SAG-TRA", "T1 TRA"],
     ],
 )
-def test_extra_target_or_multiple_tra_never_auto_selects(tmp_path, names):
+def test_axial_finishes_identification_despite_other_target_candidates(tmp_path, names):
     index, identify = make_missing(tmp_path, {"phantom01": [*names, "FLAIR"]})
-    assert identify.summary()["counts"]["t1"]["pending_subjects"] == 1
-    assert index.choices("phantom01")["t1"]["choice"] is None
+    assert identify.summary()["counts"]["t1"]["pending_subjects"] == 0
+    axial = identify.preferred_t1("phantom01", identify.state)
+    choice = index.choices("phantom01")["t1"]["choice"]
+    assert choice == (axial[0] if len(axial) == 1 else None)
 
 
 def test_same_name_tra_repeats_remain_multiple_images(tmp_path):
@@ -115,12 +117,15 @@ def test_same_name_tra_repeats_remain_multiple_images(tmp_path):
     refreshed_inventory(index)
     fresh = ProtocolIndex(index.config).identification
     fresh.enable()
-    assert fresh.index.choices("phantom01")["t1"]["top_count"] == 2
-    assert fresh.summary()["counts"]["t1"]["pending_subjects"] == 1
+    choice = fresh.index.choices("phantom01")["t1"]
+    assert choice["count"] == 3 and choice["top_count"] == 1
+    assert fresh.index.records[choice["choice"]].source_relpaths[0].endswith("repeat.nii.gz")
+    assert fresh.summary()["counts"]["t1"]["pending_subjects"] == 0
+    assert fresh.summary()["counts"]["t1"]["automatic_unique"] == 1
 
 
 @pytest.mark.parametrize("protection", ["rule", "image", "choice", "defer", "recheck", "failed"])
-def test_manual_and_unresolved_target_protection(tmp_path, protection):
+def test_manual_choice_preserved_but_other_candidate_guards_do_not_block(tmp_path, protection):
     index, identify = make_missing(tmp_path, {"phantom01": ["T1 SAG", "T1 TRA", "FLAIR"]})
     sag = next(u for u in index.subjects["phantom01"] if identify.name_planes[u] == "sag")
     if protection == "rule":
@@ -145,7 +150,12 @@ def test_manual_and_unresolved_target_protection(tmp_path, protection):
         identify._save(state, "synthetic_recheck")
     else:
         identify.preview_outcome(sag, True)
-    assert not identify.preferred_t1("phantom01", identify.state)
+    preferred = identify.preferred_t1("phantom01", identify.state)
+    if protection in {"rule", "choice", "recheck"}:
+        assert not preferred
+    else:
+        assert len(preferred) == 1
+        assert identify.summary()["counts"]["t1"]["pending_subjects"] == 0
 
 
 def test_version_two_migration_keeps_manual_ranking_and_does_not_certify(tmp_path):

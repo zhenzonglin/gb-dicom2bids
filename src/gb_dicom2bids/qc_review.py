@@ -213,7 +213,8 @@ class ReviewService:
             and assist.identification
             and (
                 assist.identification.state["phase"] == "identification"
-                or filters.get("queue") in {"protocol", "identified", "unreadable"}
+                or filters.get("queue")
+                in {"protocol", "identified", "unreadable", "candidate_limit"}
             )
         ):
             return assist.identification.list_subjects(filters)
@@ -246,19 +247,30 @@ class ReviewService:
                 continue
             decision = self.decisions.get(subject, {})
             ratings = decision.get("candidates", {})
+            assignments = {u: assist.assignment(u) for u in uids} if assist else {}
             counts = Counter(
-                assist.assignment(uid)["modality"]
+                assignments[uid]["modality"]
                 if assist
                 else effective_modality(self.records[uid], ratings.get(uid))
                 for uid in uids
+                if not assist
+                or filters.get("others") == "1"
+                or assignments[uid]["modality"]
+                not in (
+                    assignments[uid].get("unreadable_excluded_modalities", [])
+                    + assignments[uid].get("candidate_limit_excluded_modalities", [])
+                )
             )
             if not counts["t1"] and not counts["flair"] and filters.get("others") != "1":
                 continue
             candidate_match = False
             for record in records:
                 if assist and filters.get("others") != "1":
-                    assigned = assist.assignment(candidate_id(record))
-                    if assigned["modality"] in assigned.get("unreadable_excluded_modalities", []):
+                    assigned = assignments[candidate_id(record)]
+                    if assigned["modality"] not in {"t1", "flair"} or assigned["modality"] in (
+                        assigned.get("unreadable_excluded_modalities", [])
+                        + assigned.get("candidate_limit_excluded_modalities", [])
+                    ):
                         continue
                 row = self.selection.get((subject, record.study_uid_hash, record.series_uid_hash))
                 text = " ".join([subject, record.series_description, record.protocol_name]).lower()
@@ -333,6 +345,9 @@ class ReviewService:
                 item["unreadable_excluded_modalities"] = assignment.get(
                     "unreadable_excluded_modalities", []
                 )
+                item["candidate_limit_excluded_modalities"] = assignment.get(
+                    "candidate_limit_excluded_modalities", []
+                )
                 item["default_excluded"] = assignment.get("default_excluded", False)
                 item["default_classification"] = assignment.get("default_classification", {})
                 item["classification_source"] = assignment.get("classification_source", "default")
@@ -363,6 +378,9 @@ class ReviewService:
             if assist and assist.identification
             else [],
             "sequence_choices": {m: v["choice"] for m, v in assist.choices(subject).items()}
+            if assist and assist.identification
+            else {},
+            "candidate_limits": assist.identification.candidate_limits(subject)
             if assist and assist.identification
             else {},
         }
@@ -674,6 +692,13 @@ class ReviewService:
                     {k: rating[k] for k in ("decision_source", "model_version", "rule_revision")}
                 )
             if quality == "pass":
+                if (
+                    assist
+                    and assist.identification
+                    and modality in assist.identification.candidate_limits(subject)
+                    and prior_rating.get("quality") != "pass"
+                ):
+                    raise ValueError("同一字段候选达到 4 个，该模态已自动跳过，不能新增质量通过")
                 artifact = self.artifact(uid, deep=True)
                 if not artifact or artifact["metadata"]["errors"]:
                     raise ValueError("prepare a readable, spatially valid image before approval")
@@ -695,6 +720,12 @@ class ReviewService:
             if none and not reason:
                 raise ValueError("no usable candidate requires a reason")
             if uid:
+                if (
+                    assist
+                    and assist.identification
+                    and modality in assist.identification.candidate_limits(subject)
+                ):
+                    raise ValueError("同一字段候选达到 4 个，该模态已自动跳过，不能设为最终候选")
                 record = self.require_uid(uid)
                 rating = clean["candidates"].get(uid, {})
                 if (

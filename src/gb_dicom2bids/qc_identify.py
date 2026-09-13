@@ -18,6 +18,8 @@ from .qc_unreadable import current_failure
 from .runtime import atomic_write_json, read_json, utc_now
 
 VERSION = "identify-1"
+CANDIDATE_LIMIT = 4
+CANDIDATE_LIMIT_VERSION = "candidate-field-limit-1"
 
 
 def state_path(root):
@@ -38,6 +40,8 @@ def require_quality(root):
         raise ValueError("请先完成序列识别，再点击进入质量检查；当前不能保存质量、计算质量或归档")
     if state and state.get("inventory_stamp") != inventory_stamp(root):
         raise ValueError("清单已变化，请重新运行 catalog 并完成序列识别")
+    if state and state.get("candidate_limit_version") != CANDIDATE_LIMIT_VERSION:
+        raise ValueError("候选数量规则已更新，请先运行 catalog 并完成序列识别")
 
 
 class Identification:
@@ -73,6 +77,8 @@ class Identification:
         self._review_cache = None
         self._unreadable_groups = {}
         self._unreadable_state = None
+        self._candidate_limits = {}
+        self._candidate_limit_state = None
         self.unreadable_previews = set()
         # Read only the sparse error directory, never probe every source image.
         self.failed_previews = {
@@ -148,6 +154,54 @@ class Identification:
             self._exclusions = view
         return view
 
+    def candidate_limits(self, subject: str, state: dict | None = None) -> dict:
+        """Count images per existing name family, locally to one patient and modality.
+
+        This is a workload exclusion, not evidence of bad image quality. Saved human
+        final decisions remain authoritative; protocol priorities do not bypass the cap.
+        No source file reads or geometry-based merging are needed here.
+        """
+        state = self.state if state is None else state
+        if self._candidate_limit_state is not state:
+            self._candidate_limits = {}
+            self._candidate_limit_state = state
+        if subject in self._candidate_limits:
+            return self._candidate_limits[subject]
+        result = {}
+        if state.get("candidate_limit_version") == CANDIDATE_LIMIT_VERSION:
+            pools = {m: defaultdict(list) for m in ("t1", "flair")}
+            exclusions = self.exclusions(state)
+            for uid in sorted(set(self.index.subjects[subject])):
+                assigned = self._base_assignment(uid, state)
+                modality = assigned["modality"]
+                if (
+                    modality in pools
+                    and not assigned["default_excluded"]
+                    and not exclusions.rule_excluded(uid, modality)
+                ):
+                    pools[modality][self.families[uid]].append(uid)
+            for modality, families in pools.items():
+                manual = self.index.decisions[subject].get("groups", {}).get(modality, {})
+                if manual.get("choice") or manual.get("none"):
+                    continue
+                fields = [
+                    {"family_id": f, "name": self.names[f], "count": len(ids), "ids": ids}
+                    for f, ids in sorted(families.items())
+                    if len(ids) >= CANDIDATE_LIMIT
+                ]
+                if fields:
+                    result[modality] = {
+                        "reason": "candidate_field_limit",
+                        "version": CANDIDATE_LIMIT_VERSION,
+                        "threshold": CANDIDATE_LIMIT,
+                        "operator": ">=",
+                        "fields": fields,
+                        # One excessive field skips this modality, including other fields.
+                        "candidate_ids": sorted(u for ids in families.values() for u in ids),
+                    }
+        self._candidate_limits[subject] = result
+        return result
+
     def reload(self):
         state = read_json(state_path(self.root))
         if state != self.state:
@@ -160,6 +214,8 @@ class Identification:
         self._review_cache = None
         self._unreadable_groups = {}
         self._unreadable_state = None
+        self._candidate_limits = {}
+        self._candidate_limit_state = None
 
     def defaults_enabled(self, state=None):
         return (self.state if state is None else state).get("defaults_version") in {
@@ -219,7 +275,11 @@ class Identification:
             modality = group["modality"]
             pending = set(group["pending_subjects"])
             for subject in group["subjects"]:
-                if subject in pending or subject in group.get("unreadable_subjects", []):
+                if (
+                    subject in pending
+                    or subject in group.get("unreadable_subjects", [])
+                    or subject in group.get("candidate_limit_subjects", [])
+                ):
                     continue
                 key = f"{subject}:{modality}"
                 uids = self.index.subjects[subject]
@@ -271,6 +331,7 @@ class Identification:
                     "templates": {},
                     "absent": {},
                     "defaults_version": CLASSIFICATION_VERSION,
+                    "candidate_limit_version": CANDIDATE_LIMIT_VERSION,
                 },
                 "enable",
             )
@@ -287,9 +348,25 @@ class Identification:
                 self._save(state, "default_classification_upgrade")
             elif self.state.get("inventory_stamp") != inventory_stamp(self.root):
                 self._save(dict(self.state, phase="identification"), "inventory_changed")
+            if self.state.get("candidate_limit_version") != CANDIDATE_LIMIT_VERSION:
+                backup = (
+                    self.root
+                    / "identification_backups"
+                    / f"candidate-limit-{self.state['revision']:09d}.json"
+                )
+                if not backup.exists():
+                    atomic_write_json(backup, self.state)
+                self._save(
+                    dict(
+                        self.state,
+                        candidate_limit_version=CANDIDATE_LIMIT_VERSION,
+                        phase="identification",
+                    ),
+                    "candidate_field_limit_upgrade",
+                )
         return self.catalogue()
 
-    def assignment(self, uid, state=None):
+    def _base_assignment(self, uid, state=None):
         state = self.state if state is None else state
         record = self.index.records[uid]
         saved = state.get("templates", {}).get(self.families[uid], {})
@@ -320,6 +397,14 @@ class Identification:
             else "manual_rule"
             if saved
             else "default",
+        }
+
+    def assignment(self, uid, state=None):
+        state = self.state if state is None else state
+        record = self.index.records[uid]
+        limits = self.candidate_limits(record.subject_id, state)
+        return {
+            **self._base_assignment(uid, state),
             "excluded_modalities": [
                 m for m in ("t1", "flair") if self.exclusions(state).excluded(uid, m)
             ],
@@ -327,6 +412,9 @@ class Identification:
                 m
                 for m in ("t1", "flair")
                 if uid in self.unreadable_candidates(record.subject_id, m, state)
+            ],
+            "candidate_limit_excluded_modalities": [
+                m for m, detail in limits.items() if uid in detail["candidate_ids"]
             ],
         }
 
@@ -360,6 +448,7 @@ class Identification:
                         "repeat_subjects": 0,
                         "auto_skipped_subjects": 0,
                         "unreadable_subjects": [],
+                        "candidate_limit_subjects": [],
                         "completion_counts": Counter(),
                     },
                 )
@@ -367,6 +456,7 @@ class Identification:
                 group["repeat_subjects"] += int(
                     len(candidates) > len(families)
                     and not self.unreadable_candidates(subject, modality, state)
+                    and modality not in self.candidate_limits(subject, state)
                 )
                 manual = self.index.decisions[subject].get("groups", {}).get(modality, {})
                 known = all(f in state.get("templates", {}) for f in families)
@@ -402,6 +492,10 @@ class Identification:
                     group["auto_skipped_subjects"] += 1
                 retained = state.get("manual_completed", {}).get(f"{subject}:{modality}", {})
                 protected = bool(retained) and retained.get("stamp") == self.subject_stamp(subject)
+                if modality in self.candidate_limits(subject, state):
+                    group["candidate_limit_subjects"].append(subject)
+                    group["completion_counts"]["candidate_limit_skipped"] += 1
+                    continue
                 if manual.get("choice") or manual.get("none") or (protected and not recheck):
                     group["completion_counts"]["manual_completed"] += 1
                     continue
@@ -514,6 +608,7 @@ class Identification:
                             "automatic_unique",
                             "default_skipped",
                             "unreadable_skipped",
+                            "candidate_limit_skipped",
                             "multiple_candidates",
                             "unknown_pending",
                         )
@@ -524,6 +619,8 @@ class Identification:
                 "revision": self.state["revision"],
                 "phase": self.state["phase"],
                 "defaults_version": self.state.get("defaults_version", "legacy"),
+                "candidate_limit": CANDIDATE_LIMIT,
+                "candidate_limit_version": self.state.get("candidate_limit_version", "legacy"),
                 "default_excluded_series": sum(
                     self.default_excluded(u) for u in self.index.records
                 ),
@@ -548,7 +645,8 @@ class Identification:
 
     def list_subjects(self, filters):
         groups = self.catalogue()["groups"]
-        if filters.get("queue") == "unreadable":
+        if filters.get("queue") in {"unreadable", "candidate_limit"}:
+            limited = filters.get("queue") == "candidate_limit"
             query = filters.get("q", "").lower()
             center = filters.get("center", "").lower()
             rows = [
@@ -559,11 +657,16 @@ class Identification:
                     "modality": group["modality"],
                     "count": 1,
                     "pending_count": 0,
-                    "reason": "all_candidates_unreadable",
+                    "reason": "candidate_field_limit" if limited else "all_candidates_unreadable",
+                    "candidate_limit": self.candidate_limits(subject).get(group["modality"])
+                    if limited
+                    else None,
                     "needs_protocol": False,
                 }
                 for group in groups
-                for subject in group["unreadable_subjects"]
+                for subject in group[
+                    "candidate_limit_subjects" if limited else "unreadable_subjects"
+                ]
                 if (not center or center in group["center"].lower())
                 and (not query or query in subject.lower())
             ]

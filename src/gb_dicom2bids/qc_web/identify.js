@@ -5,6 +5,7 @@ let unreadableRefreshTimer=null;
 const identifying=()=>workflow?.enabled&&workflow.phase==='identification';
 
 function identificationCandidates(){
+  if($('#assist-queue').value==='candidate_limit'&&!identificationShowAll)return [];
   const group=current.identification_groups?.find(g=>g.id===activeIdentificationGroup);
   if(!group||identificationShowAll)return current.candidates;
   const allowed=new Set(group.new_candidate_ids||current.candidates.map(c=>c.id));
@@ -47,10 +48,11 @@ function displayWorkflow(value){
   $('#workflow-status').textContent=identifying()
     ?`阶段 1 · 序列识别：T1 待识别 ${t.pending_groups} 组 / ${t.pending_subjects} 人；FLAIR 待识别 ${f.pending_groups} 组 / ${f.pending_subjects} 人。此阶段不判断图像质量。`
     :'阶段 2 · 质量检查：序列识别已完成。质量逐幅判断，不从代表病例复制。';
+  $('#default-summary').textContent+=` 同字段 ≥4 自动跳过 T1 ${t.candidate_limit_skipped??0} / FLAIR ${f.candidate_limit_skipped??0} 人。仅跳过触发模态。`;
   $('#next-stage').textContent=identifying()?'序列识别完成，进入质量检查':'返回序列识别（暂停质量授权）';
   $('#next-stage').disabled=identifying()&&value.pending_groups>0;
   for(const option of $('#assist-queue').options){
-    const sequence=['protocol','identified','unreadable'].includes(option.value);
+    const sequence=['protocol','identified','unreadable','candidate_limit'].includes(option.value);
     option.disabled=identifying()?!sequence:sequence;
   }
   if($('#assist-queue').selectedOptions[0].disabled)$('#assist-queue').value=identifying()?'protocol':'';
@@ -71,6 +73,18 @@ async function renderIdentification(){
   let group=options.find(g=>g.id===activeIdentificationGroup)||options.find(g=>g.needs_protocol)||options[0];
   if(!group){content.append(element('p','此患者无待识别组。'));return;}
   activeIdentificationGroup=group.id;
+  const limit=current.candidate_limits?.[group.modality];
+  if(limit){
+    content.append(element('h3',`${group.modality.toUpperCase()} · 同一字段候选 ≥4，已自动跳过`));
+    for(const field of limit.fields)content.append(element('p',`${field.name}：${field.count} 个候选影像（阈值 ≥${limit.threshold}）`));
+    content.append(element('p','只跳过本患者的触发模态；另一个模态独立处理。不要求质量检查，不删除影像，也不生成质量不通过。已有人工最终决定保留。'));
+  }
+  if($('#assist-queue').value==='candidate_limit'){
+    content.append(element('p','这是数量排除记录，不会自动准备预览。需要核对序列时，可点击下方按钮；修改分类规则请使用“规则回顾”或“全部 T1/FLAIR 协议组”。'));
+    const view=element('button','查看全部序列（仅核对）');
+    view.onclick=()=>{identificationShowAll=!identificationShowAll;renderPanes();};
+    content.append(view);renderPanes();return;
+  }
   if($('#assist-queue').value==='unreadable'){
     identificationShowAll=true;
     content.append(element('h3',`${group.modality.toUpperCase()} · 全部待选不可读，已技术跳过`));
@@ -89,7 +103,7 @@ async function renderIdentification(){
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
   content.append(element('p',`有效 ${target} 候选归属明确、无目标候选冲突或待定时，该患者结束 ${target} 识别；无需继续排除无关序列。`,'hint'));
   content.append(element('p',`保留 ${target}、仅移出部分模板时，请在对应模板的下拉框选择“不是 ${target}（移出候选）”，再预览同类影响；预览失败不阻拦排除，手动勾选待定的模板仍受保护。`,'hint'));
-  const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality)&&!c.unreadable_excluded_modalities?.includes(group.modality));
+  const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality)&&!c.unreadable_excluded_modalities?.includes(group.modality)&&!c.candidate_limit_excluded_modalities?.includes(group.modality));
   if(excludedTargets.length)content.append(element('p',`以下带 ${target} 标签的序列已被本组排除，不是有效候选：${excludedTargets.map(c=>c.series_description).join('；')}。如需恢复，请展开“已排除模板 / 撤回排除”，撤回对应模板后再加入 ${target} 识别。`,'list-error'));
   content.append(element('p',`本轮新序列 ${group.new_template_count??0} 种 · 累计排除 ${group.excluded_template_count??0} 种 · 自动跳过 ${group.auto_skipped_subjects??0} 人 · 剩余待识别 ${group.pending_count} 人`));
   if(group.unreadable_subjects?.includes(current.subject))content.append(element('p','本例本轮全部待选不可读，已技术跳过（不是模态排除或质量不通过）。勾选查看全部序列可重试预览；重试成功后恢复。','hint'));

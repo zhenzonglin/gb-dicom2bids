@@ -39,7 +39,13 @@ holds do not qualify. The recovery queue retains all images and logs for retry; 
 decision or cross-patient exclusion rule is created.
 Only a unique candidate can finish identification automatically, with one protocol preference:
 an untouched T1 SAG/TRA combination prefers a unique TRA image. SAG remains a T1 alternative;
-multiple TRA images or an additional unresolved T1 protocol still require comparison.
+multiple TRA images or an additional unresolved T1 protocol still require comparison,
+unless one normalized name field has **four or more candidate images in that patient**.
+At this fixed, inclusive limit, only the triggering modality is skipped, including its other
+fields; the other modality remains independent. Different fields and patients are not summed.
+Saved human final decisions are preserved. This workload exclusion is not a quality failure.
+The viewer's count-exclusion queue shows the field and count without automatically opening images.
+Run `catalog` after updating to enable this rule and back up the prior private identification state.
 This never grants image quality. The persistent rule-review panel can preview and revoke current
 inclusion, exclusion, absence and recheck rules without undoing image-quality decisions or BIDS.
 Sequence identification needs no free-text justification. After a human confirms a round's

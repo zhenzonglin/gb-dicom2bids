@@ -34,8 +34,11 @@ class ExclusionView:
 
     def excluded(self, uid: str, modality: str) -> bool:
         subject = self.identify.index.records[uid].subject_id
-        return self.rule_excluded(uid, modality) or uid in self.identify.unreadable_candidates(
-            subject, modality, self.state
+        limit = self.identify.candidate_limits(subject, self.state).get(modality, {})
+        return (
+            uid in limit.get("candidate_ids", [])
+            or self.rule_excluded(uid, modality)
+            or uid in self.identify.unreadable_candidates(subject, modality, self.state)
         )
 
     def rule_excluded(self, uid: str, modality: str) -> bool:
@@ -53,6 +56,8 @@ class ExclusionView:
         )
 
     def round(self, subject: str, modality: str, *, automatic: bool = True) -> list[str]:
+        if automatic and modality in self.identify.candidate_limits(subject, self.state):
+            return []
         _, scope = self.scope(subject, modality)
         excluded = self.excluded if automatic else self.rule_excluded
         return sorted(

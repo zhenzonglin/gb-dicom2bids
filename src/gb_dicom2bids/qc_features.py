@@ -170,9 +170,10 @@ def run_features(
     jobs = []
     for uid, record in sorted(index.records.items()):
         assignment = index.assignment(uid)
-        if assignment["modality"] not in {"t1", "flair"} or assignment[
-            "modality"
-        ] in assignment.get("unreadable_excluded_modalities", []):
+        if assignment["modality"] not in {"t1", "flair"} or assignment["modality"] in (
+            assignment.get("unreadable_excluded_modalities", [])
+            + assignment.get("candidate_limit_excluded_modalities", [])
+        ):
             continue
         jobs.append(
             {

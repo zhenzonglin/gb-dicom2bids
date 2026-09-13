@@ -40,6 +40,7 @@ from .qc_state import (
     save_decision,
     writer_lock,
 )
+from .qc_unreadable import FAILURE_KIND, image_read_failure, source_stamp
 from .runtime import (
     atomic_write_json,
     read_json,
@@ -212,7 +213,7 @@ class ReviewService:
             and assist.identification
             and (
                 assist.identification.state["phase"] == "identification"
-                or filters.get("queue") in {"protocol", "identified"}
+                or filters.get("queue") in {"protocol", "identified", "unreadable"}
             )
         ):
             return assist.identification.list_subjects(filters)
@@ -255,6 +256,10 @@ class ReviewService:
                 continue
             candidate_match = False
             for record in records:
+                if assist and filters.get("others") != "1":
+                    assigned = assist.assignment(candidate_id(record))
+                    if assigned["modality"] in assigned.get("unreadable_excluded_modalities", []):
+                        continue
                 row = self.selection.get((subject, record.study_uid_hash, record.series_uid_hash))
                 text = " ".join([subject, record.series_description, record.protocol_name]).lower()
                 if query and query not in text:
@@ -325,6 +330,9 @@ class ReviewService:
                 assignment = assist.assignment(uid)
                 item["candidate_type"] = assignment["modality"]
                 item["excluded_modalities"] = assignment.get("excluded_modalities", [])
+                item["unreadable_excluded_modalities"] = assignment.get(
+                    "unreadable_excluded_modalities", []
+                )
                 item["default_excluded"] = assignment.get("default_excluded", False)
                 item["default_classification"] = assignment.get("default_classification", {})
                 item["classification_source"] = assignment.get("classification_source", "default")
@@ -457,13 +465,14 @@ class ReviewService:
             ):
                 raise ValueError("preview queue is full; wait for existing jobs")
             self.jobs[uid] = {"state": "queued"}
+            self._preview_outcome(uid, False)
             self.executor.submit(self._prepare_job, uid)
             return dict(self.jobs[uid])
 
-    def _preview_outcome(self, uid: str, failed: bool) -> None:
+    def _preview_outcome(self, uid: str, failed: bool, *, unreadable: bool = False) -> None:
         with self.lock:
             if self._assist and self._assist.identification:
-                self._assist.identification.preview_outcome(uid, failed)
+                self._assist.identification.preview_outcome(uid, failed, unreadable=unreadable)
             if not failed:
                 path = self.root / "errors" / f"{uid}.json"
                 prior = read_json(path)
@@ -474,6 +483,7 @@ class ReviewService:
         from .convert import _convert_one
 
         record = self.require_uid(uid)
+        image, stamp, reading_image = None, None, False
         try:
             while not self.stop.is_set():
                 try:
@@ -494,7 +504,10 @@ class ReviewService:
                     raise ValueError("invalid NIfTI source record")
                 image = (source_root / record.source_relpaths[0]).resolve()
                 image.relative_to(source_root.resolve())
+                stamp = source_stamp(image)
+                reading_image = True
                 self.volumes.metadata(image)
+                reading_image = False
                 sidecar = self.root / "sidecars" / f"{uid}.json"
                 atomic_write_json(
                     sidecar,
@@ -558,9 +571,21 @@ class ReviewService:
             self.jobs[uid] = {"state": "ready"}
             self._preview_outcome(uid, False)
         except Exception as exc:
-            self.jobs[uid] = {"state": "failed", "error": str(exc)}
-            atomic_write_json(self.root / "errors" / f"{uid}.json", self.jobs[uid])
-            self._preview_outcome(uid, True)
+            unreadable = bool(
+                reading_image and stamp and image_read_failure(exc) and source_stamp(image) == stamp
+            )
+            value = {
+                "state": "failed",
+                "error": str(exc),
+                "failure_kind": FAILURE_KIND if unreadable else "preview_failure",
+                "record_digest": record_digest(record),
+                "source_stamp": stamp,
+                "failed_at": utc_now(),
+            }
+            with self.lock:
+                atomic_write_json(self.root / "errors" / f"{uid}.json", value)
+                self._preview_outcome(uid, True, unreadable=unreadable)
+                self.jobs[uid] = value
 
     def log_text(self, uid: str) -> str:
         self.require_uid(uid)

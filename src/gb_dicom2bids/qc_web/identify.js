@@ -1,6 +1,7 @@
 "use strict";
 let workflow=null, activeIdentificationGroup=null, identificationDraft=null;
 let identificationShowAll=false, identificationDeferred=new Set(), identificationFailures=new Set();
+let unreadableRefreshTimer=null;
 const identifying=()=>workflow?.enabled&&workflow.phase==='identification';
 
 function identificationCandidates(){
@@ -15,6 +16,24 @@ function identificationFailure(id){
   // A technical error is not a human decision. Never check or lock a defer box here.
   identificationFailures.add(id);
   document.querySelector('#identify-publish')?.setAttribute('disabled','');
+  const group=current?.identification_groups?.find(g=>g.id===activeIdentificationGroup);
+  if(dirty||identificationShowAll||$('#assist-queue').value!=='protocol'||!group?.new_candidate_ids?.length)return;
+  if(!group.new_candidate_ids.every(u=>identificationFailures.has(u))||group.new_candidate_ids.some(u=>identificationDeferred.has(u)))return;
+  clearTimeout(unreadableRefreshTimer);
+  const subject=current.subject,modality=group.modality,epoch=generation;
+  unreadableRefreshTimer=setTimeout(async()=>{
+    try{
+      const updated=await api('/api/subject?id='+encodeURIComponent(subject));
+      if(generation!==epoch||current?.subject!==subject||dirty||identificationShowAll)return;
+      // The server verifies source-bound permanent failures; browser/network errors never suffice.
+      if(!updated.candidates.some(c=>c.unreadable_excluded_modalities?.includes(modality)))return;
+      current=null;activeIdentificationGroup=null;generation++;offset=0;
+      clearImages($('#panes'));$('#panes').replaceChildren();$('#protocol-panel').hidden=true;
+      $('#subject-title').textContent='选择一位受试者';
+      await refreshList(group.id);
+      message(`${subject} 的 ${modality.toUpperCase()} 本轮全部待选已确认不可读，已技术跳过；文件和人工 QC 未改变，可在“不可读跳过 · 可重试”队列找回。`);
+    }catch(error){message(error.message,true);}
+  },100);
 }
 
 function displayWorkflow(value){
@@ -24,14 +43,14 @@ function displayWorkflow(value){
   $('#open-rule-review').disabled=!value.enabled;
   if(!value.enabled)return;
   const t=value.counts.t1,f=value.counts.flair;
-  $('#default-summary').textContent=`人工完成 T1 ${t.manual_completed??0} / FLAIR ${f.manual_completed??0} · 自动唯一识别 T1 ${t.automatic_unique??0} / FLAIR ${f.automatic_unique??0} · 多候选待识别 T1 ${t.multiple_candidates??0} / FLAIR ${f.multiple_candidates??0} · 默认非目标 ${value.default_excluded_series??0} 条。识别完成不代表质量通过。`;
+  $('#default-summary').textContent=`人工完成 T1 ${t.manual_completed??0} / FLAIR ${f.manual_completed??0} · 自动唯一识别 T1 ${t.automatic_unique??0} / FLAIR ${f.automatic_unique??0} · 多候选待识别 T1 ${t.multiple_candidates??0} / FLAIR ${f.multiple_candidates??0} · 全部待选不可读 T1 ${t.unreadable_skipped??0} / FLAIR ${f.unreadable_skipped??0} · 默认非目标 ${value.default_excluded_series??0} 条。识别完成不代表质量通过。`;
   $('#workflow-status').textContent=identifying()
     ?`阶段 1 · 序列识别：T1 待识别 ${t.pending_groups} 组 / ${t.pending_subjects} 人；FLAIR 待识别 ${f.pending_groups} 组 / ${f.pending_subjects} 人。此阶段不判断图像质量。`
     :'阶段 2 · 质量检查：序列识别已完成。质量逐幅判断，不从代表病例复制。';
   $('#next-stage').textContent=identifying()?'序列识别完成，进入质量检查':'返回序列识别（暂停质量授权）';
   $('#next-stage').disabled=identifying()&&value.pending_groups>0;
   for(const option of $('#assist-queue').options){
-    const sequence=['protocol','identified'].includes(option.value);
+    const sequence=['protocol','identified','unreadable'].includes(option.value);
     option.disabled=identifying()?!sequence:sequence;
   }
   if($('#assist-queue').selectedOptions[0].disabled)$('#assist-queue').value=identifying()?'protocol':'';
@@ -52,6 +71,12 @@ async function renderIdentification(){
   let group=options.find(g=>g.id===activeIdentificationGroup)||options.find(g=>g.needs_protocol)||options[0];
   if(!group){content.append(element('p','此患者无待识别组。'));return;}
   activeIdentificationGroup=group.id;
+  if($('#assist-queue').value==='unreadable'){
+    identificationShowAll=true;
+    content.append(element('h3',`${group.modality.toUpperCase()} · 全部待选不可读，已技术跳过`));
+    content.append(element('p','保留原始模态、文件和错误日志；未写入质量不通过。下方展示全部序列，可切换候选并重试预览。重试成功后恢复识别；不会把本例错误传播到其他患者。'));
+    renderPanes();return;
+  }
   const data=await api('/api/identify?group='+encodeURIComponent(group.id));
   if(activeIdentificationGroup!==group.id)return;
   displayWorkflow(data);group=data.group;
@@ -64,9 +89,10 @@ async function renderIdentification(){
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
   content.append(element('p',`有效 ${target} 候选归属明确、无目标候选冲突或待定时，该患者结束 ${target} 识别；无需继续排除无关序列。`,'hint'));
   content.append(element('p',`保留 ${target}、仅移出部分模板时，请在对应模板的下拉框选择“不是 ${target}（移出候选）”，再预览同类影响；预览失败不阻拦排除，手动勾选待定的模板仍受保护。`,'hint'));
-  const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality));
+  const excludedTargets=current.candidates.filter(c=>c.candidate_type===group.modality&&c.excluded_modalities?.includes(group.modality)&&!c.unreadable_excluded_modalities?.includes(group.modality));
   if(excludedTargets.length)content.append(element('p',`以下带 ${target} 标签的序列已被本组排除，不是有效候选：${excludedTargets.map(c=>c.series_description).join('；')}。如需恢复，请展开“已排除模板 / 撤回排除”，撤回对应模板后再加入 ${target} 识别。`,'list-error'));
   content.append(element('p',`本轮新序列 ${group.new_template_count??0} 种 · 累计排除 ${group.excluded_template_count??0} 种 · 自动跳过 ${group.auto_skipped_subjects??0} 人 · 剩余待识别 ${group.pending_count} 人`));
+  if(group.unreadable_subjects?.includes(current.subject))content.append(element('p','本例本轮全部待选不可读，已技术跳过（不是模态排除或质量不通过）。勾选查看全部序列可重试预览；重试成功后恢复。','hint'));
   const showAllLabel=element('label',' 查看全部序列（含已排除）'),showAll=element('input');
   showAll.id='identify-show-all';showAll.type='checkbox';showAll.checked=identificationShowAll;showAllLabel.prepend(showAll);content.append(showAllLabel);
   const entries=new Map(group.templates.map(e=>[e.id,{...e}]));

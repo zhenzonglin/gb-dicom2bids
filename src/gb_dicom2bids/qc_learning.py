@@ -36,7 +36,9 @@ def feature_rows(index: ProtocolIndex, subjects: set[str] | None = None) -> list
         if subjects is not None and record.subject_id not in subjects:
             continue
         assignment = index.assignment(uid)
-        if assignment["modality"] not in {"t1", "flair"}:
+        if assignment["modality"] not in {"t1", "flair"} or assignment[
+            "modality"
+        ] in assignment.get("unreadable_excluded_modalities", []):
             continue
         feature = read_json(index.root / "features" / f"{uid}.json")
         try:

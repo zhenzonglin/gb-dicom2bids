@@ -33,6 +33,10 @@ Names containing both `t1` and `flair`, in either order and with arbitrary inter
 default to T1. Other FLAIR names default to FLAIR. XA (DSA in this project's exclusion category),
 CT, TOF, MRA, DWI, b0 and b1000 default to
 non-target, but remain available for manual correction. Existing human decisions take priority.
+If every remaining candidate in a patient's modality-specific round has a verified image-read
+failure, that round is technically skipped. Untried files, temporary I/O failures and human
+holds do not qualify. The recovery queue retains all images and logs for retry; no quality
+decision or cross-patient exclusion rule is created.
 Only a unique candidate can finish identification automatically, with one protocol preference:
 an untouched T1 SAG/TRA combination prefers a unique TRA image. SAG remains a T1 alternative;
 multiple TRA images or an additional unresolved T1 protocol still require comparison.

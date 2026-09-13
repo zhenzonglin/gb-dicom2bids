@@ -169,7 +169,10 @@ def run_features(
         raise ValueError("feature workers must be between 1 and 64")
     jobs = []
     for uid, record in sorted(index.records.items()):
-        if index.assignment(uid)["modality"] not in {"t1", "flair"}:
+        assignment = index.assignment(uid)
+        if assignment["modality"] not in {"t1", "flair"} or assignment[
+            "modality"
+        ] in assignment.get("unreadable_excluded_modalities", []):
             continue
         jobs.append(
             {

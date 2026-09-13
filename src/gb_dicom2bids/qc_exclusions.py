@@ -33,6 +33,12 @@ class ExclusionView:
         )
 
     def excluded(self, uid: str, modality: str) -> bool:
+        subject = self.identify.index.records[uid].subject_id
+        return self.rule_excluded(uid, modality) or uid in self.identify.unreadable_candidates(
+            subject, modality, self.state
+        )
+
+    def rule_excluded(self, uid: str, modality: str) -> bool:
         record = self.identify.index.records[uid]
         _, scope = self.scope(record.subject_id, modality)
         rule = scope.get("templates", {}).get(self.identify.families[uid])
@@ -46,12 +52,13 @@ class ExclusionView:
             and not self.positive(uid, modality)
         )
 
-    def round(self, subject: str, modality: str) -> list[str]:
+    def round(self, subject: str, modality: str, *, automatic: bool = True) -> list[str]:
         _, scope = self.scope(subject, modality)
+        excluded = self.excluded if automatic else self.rule_excluded
         return sorted(
             u
             for u in self.identify.index.subjects[subject]
-            if not self.excluded(u, modality)
+            if not excluded(u, modality)
             and (
                 not self.identify.default_excluded(u, self.state) or u in scope.get("deferred", [])
             )

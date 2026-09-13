@@ -14,6 +14,7 @@ from .qc_images import check_image
 from .qc_protocols import explicit, fingerprint, normalize_name
 from .qc_protocols import source_path as nifti_source
 from .qc_state import ConflictError, effective_modality, record_digest
+from .qc_unreadable import current_failure
 from .runtime import atomic_write_json, read_json, utc_now
 
 VERSION = "identify-1"
@@ -70,6 +71,9 @@ class Identification:
         self.name_planes = {u: named_t1_plane(r) for u, r in index.records.items()}
         self._subject_stamps = {}
         self._review_cache = None
+        self._unreadable_groups = {}
+        self._unreadable_state = None
+        self.unreadable_previews = set()
         # Read only the sparse error directory, never probe every source image.
         self.failed_previews = {
             p.stem
@@ -82,15 +86,59 @@ class Identification:
                 < p.stat().st_mtime_ns
             )
         }
+        if index.config.nifti_import.enabled:
+            for uid in self.failed_previews:
+                record = index.records[uid]
+                value = read_json(self.root.parent / "errors" / f"{uid}.json")
+                if current_failure(value, record, nifti_source(index.config, record)):
+                    self.unreadable_previews.add(uid)
 
-    def preview_outcome(self, uid: str, failed: bool):
-        if (uid in self.failed_previews) == failed:
+    def preview_outcome(self, uid: str, failed: bool, *, unreadable: bool = False):
+        unreadable = failed and unreadable
+        if (uid in self.failed_previews) == failed and (
+            uid in self.unreadable_previews
+        ) == unreadable:
             return
         if failed:
             self.failed_previews = self.failed_previews | {uid}
         else:
             self.failed_previews = self.failed_previews - {uid}
+        self.unreadable_previews = (
+            self.unreadable_previews | {uid} if unreadable else self.unreadable_previews - {uid}
+        )
         self.invalidate()
+
+    def unreadable_candidates(self, subject: str, modality: str, state=None) -> list[str]:
+        """Skip only an entire remaining round in this patient; never reuse a failure template."""
+        state = self.state if state is None else state
+        if self._unreadable_state is not state:
+            self._unreadable_groups = {}
+            self._unreadable_state = state
+        key = (subject, modality)
+        if key in self._unreadable_groups:
+            return self._unreadable_groups[key]
+        result = []
+        if self.unreadable_previews and self.defaults_enabled(state):
+            exclusions = self.exclusions(state)
+            remaining = exclusions.round(subject, modality, automatic=False)
+            _, scope = exclusions.scope(subject, modality)
+            decision = self.index.decisions[subject]
+            group = decision.get("groups", {}).get(modality, {})
+            held = any(
+                f"{subject}:{modality}" in state.get(name, {}) for name in ("recheck", "absent")
+            )
+            retained = state.get("manual_completed", {}).get(f"{subject}:{modality}", {})
+            protected = retained.get("stamp") == self.subject_stamp(subject) if retained else False
+            if (
+                remaining
+                and set(remaining).issubset(self.unreadable_previews)
+                and not set(remaining).intersection(scope.get("deferred", []))
+                and not (group.get("choice") or group.get("none") or held or protected)
+                and not any(explicit(decision.get("candidates", {}).get(u)) for u in remaining)
+            ):
+                result = remaining
+        self._unreadable_groups[key] = result
+        return result
 
     def exclusions(self, state=None):
         state = self.state if state is None else state
@@ -110,6 +158,8 @@ class Identification:
         self._catalogue = None
         self._exclusions = None
         self._review_cache = None
+        self._unreadable_groups = {}
+        self._unreadable_state = None
 
     def defaults_enabled(self, state=None):
         return (self.state if state is None else state).get("defaults_version") in {
@@ -169,7 +219,7 @@ class Identification:
             modality = group["modality"]
             pending = set(group["pending_subjects"])
             for subject in group["subjects"]:
-                if subject in pending:
+                if subject in pending or subject in group.get("unreadable_subjects", []):
                     continue
                 key = f"{subject}:{modality}"
                 uids = self.index.subjects[subject]
@@ -183,7 +233,8 @@ class Identification:
                 _, scope = self.exclusions(state).scope(subject, modality)
                 known = families and all(f in state.get("templates", {}) for f in families)
                 missing = key in state.get("absent", {}) or (
-                    scope.get("templates") and not self.exclusions(state).round(subject, modality)
+                    scope.get("templates")
+                    and not self.exclusions(state).round(subject, modality, automatic=False)
                 )
                 if known or missing or manual.get("choice") or manual.get("none"):
                     retained[key] = {"stamp": self.subject_stamp(subject), "source": "manual"}
@@ -272,6 +323,11 @@ class Identification:
             "excluded_modalities": [
                 m for m in ("t1", "flair") if self.exclusions(state).excluded(uid, m)
             ],
+            "unreadable_excluded_modalities": [
+                m
+                for m in ("t1", "flair")
+                if uid in self.unreadable_candidates(record.subject_id, m, state)
+            ],
         }
 
     def _groups(self, state):
@@ -285,7 +341,8 @@ class Identification:
                 candidates = [
                     u
                     for u in uids
-                    if values[u]["modality"] == modality and not exclusions.excluded(u, modality)
+                    if values[u]["modality"] == modality
+                    and not exclusions.rule_excluded(u, modality)
                 ]
                 families = sorted({self.families[u] for u in candidates})
                 sid, scope = exclusions.scope(subject, modality)
@@ -302,11 +359,15 @@ class Identification:
                         "reason": "",
                         "repeat_subjects": 0,
                         "auto_skipped_subjects": 0,
+                        "unreadable_subjects": [],
                         "completion_counts": Counter(),
                     },
                 )
                 group["subjects"].append(subject)
-                group["repeat_subjects"] += int(len(candidates) > len(families))
+                group["repeat_subjects"] += int(
+                    len(candidates) > len(families)
+                    and not self.unreadable_candidates(subject, modality, state)
+                )
                 manual = self.index.decisions[subject].get("groups", {}).get(modality, {})
                 known = all(f in state.get("templates", {}) for f in families)
                 automatic = len(
@@ -319,7 +380,9 @@ class Identification:
                     automatic = len(preferred_t1) == 1
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
                 remaining = exclusions.round(subject, modality)
-                negative_done = bool(scope) and not remaining
+                negative_done = bool(scope) and not exclusions.round(
+                    subject, modality, automatic=False
+                )
                 default_done = self.defaults_enabled(state) and not remaining
                 target_identified = bool(families) and (known or automatic)
                 # Once target protocols are settled, optional non-target images
@@ -341,6 +404,10 @@ class Identification:
                 protected = bool(retained) and retained.get("stamp") == self.subject_stamp(subject)
                 if manual.get("choice") or manual.get("none") or (protected and not recheck):
                     group["completion_counts"]["manual_completed"] += 1
+                    continue
+                if self.unreadable_candidates(subject, modality, state):
+                    group["unreadable_subjects"].append(subject)
+                    group["completion_counts"]["unreadable_skipped"] += 1
                     continue
                 if (
                     not deferred
@@ -446,6 +513,7 @@ class Identification:
                             "manual_completed",
                             "automatic_unique",
                             "default_skipped",
+                            "unreadable_skipped",
                             "multiple_candidates",
                             "unknown_pending",
                         )
@@ -480,6 +548,32 @@ class Identification:
 
     def list_subjects(self, filters):
         groups = self.catalogue()["groups"]
+        if filters.get("queue") == "unreadable":
+            query = filters.get("q", "").lower()
+            center = filters.get("center", "").lower()
+            rows = [
+                {
+                    "id": subject,
+                    "identification_group": group["id"],
+                    "center": group["center"],
+                    "modality": group["modality"],
+                    "count": 1,
+                    "pending_count": 0,
+                    "reason": "all_candidates_unreadable",
+                    "needs_protocol": False,
+                }
+                for group in groups
+                for subject in group["unreadable_subjects"]
+                if (not center or center in group["center"].lower())
+                and (not query or query in subject.lower())
+            ]
+            offset = max(0, int(filters.get("offset", 0)))
+            return {
+                "total": len(rows),
+                "subjects": rows[offset : offset + 100],
+                "unit": "subject_modalities",
+                "identification": self.summary(),
+            }
         pending = filters.get("queue") != "identified"
         groups = [g for g in groups if not pending or g["needs_protocol"]]
         query, center = filters.get("q", "").lower(), filters.get("center", "").lower()

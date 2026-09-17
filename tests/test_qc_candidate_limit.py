@@ -36,7 +36,7 @@ def make_count_index(tmp_path, subjects):
     [
         ("T1 tra", "t1"),
         ("eT1W-SE", "t1"),
-        ("T1 extra SAG", "t1"),
+        ("T1 extra SE", "t1"),
         ("FLAIR_AX_T1", "t1"),
         ("T1__FLAIR", "t1"),
         ("MPRAGE", "t1"),
@@ -65,8 +65,8 @@ def test_fixed_inclusive_threshold_all_target_fields(tmp_path, name, modality, c
     else:
         assert not limits
         assert index.choices("phantom01")[modality]["count"] == 3
-        assert stats[modality]["pending_subjects"] == int(name != "T1 tra")
-        if name == "T1 tra":
+        assert stats[modality]["pending_subjects"] == int(name not in {"T1 tra", "FLAIR_AX_T1"})
+        if name in {"T1 tra", "FLAIR_AX_T1"}:
             selected = index.choices("phantom01")[modality]["choice"]
             assert index.records[selected].source_relpaths[0].endswith("image2.nii.gz")
 
@@ -89,7 +89,7 @@ def test_no_cross_field_or_patient_sum_and_no_slice_count(tmp_path, monkeypatch)
     identify.invalidate()
     assert all(not identify.candidate_limits(s) for s in index.subjects)
     assert identify.summary()["counts"]["t1"]["candidate_limit_skipped"] == 0
-    assert index.choices("phantom01")["t1"]["count"] == 6
+    assert index.choices("phantom01")["t1"]["count"] == 3
 
 
 def test_name_prefix_separator_and_geometry_variants_share_field(tmp_path):
@@ -114,7 +114,7 @@ def test_name_prefix_separator_and_geometry_variants_share_field(tmp_path):
 
 def test_one_excessive_field_skips_whole_modality_before_priority(tmp_path):
     index, identify = make_count_index(
-        tmp_path, {"phantom01": {"T1 tra": 1, "T1 sag": 4, "FLAIR": 1}}
+        tmp_path, {"phantom01": {"T1 tra": 1, "T1 extra SE": 4, "FLAIR": 1}}
     )
     assert not identify.preferred_t1("phantom01", identify.state)
     payload = payload_for(identify, "t1")

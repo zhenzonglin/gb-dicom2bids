@@ -105,10 +105,11 @@ def test_defaults_unique_multiple_and_only_non_target_do_not_grant_quality(tmp_p
     pending = {
         (s, g["modality"]) for g in identify.catalogue()["groups"] for s in g["pending_subjects"]
     }
-    assert pending == {("phantom02", "t1"), ("phantom04", "t1"), ("phantom04", "flair")}
+    assert pending == {("phantom04", "t1"), ("phantom04", "flair")}
     assert index.choices("phantom01")["t1"]["count"] == 1
-    assert index.choices("phantom02")["t1"]["choice"] is None
-    assert identify.summary()["counts"]["t1"]["automatic_unique"] == 1
+    selected = index.choices("phantom02")["t1"]["choice"]
+    assert index.records[selected].series_description == "T1 AX FLAIR"
+    assert identify.summary()["counts"]["t1"]["automatic_unique"] == 2
     assert not identify.exclusions().round("phantom03", "t1")
     with pytest.raises(ValueError, match="序列识别"):
         require_quality(index.root)
@@ -169,7 +170,8 @@ def test_migration_keeps_manual_completions_and_artifact_identity(tmp_path, monk
     identify.enable()
     assert identify.state["revision"] == revision
     revoke(identify, "include")
-    assert identify.summary()["counts"]["t1"]["pending_subjects"] == 2
+    assert identify.summary()["counts"]["t1"]["pending_subjects"] == 0
+    assert not identify.state.get("manual_completed")
 
 
 def test_partial_exclusion_is_not_migrated_as_whole_group_completion(tmp_path):

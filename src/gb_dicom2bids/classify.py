@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-6"
+CLASSIFICATION_VERSION = "sequence-defaults-7"
 
 T1_KEYWORDS = (
     "t1",
@@ -48,6 +48,21 @@ def named_t1_plane(record: SeriesRecord) -> str | None:
     return named_target_plane(record, "t1")
 
 
+def name_plane_hints(value: str) -> set[str]:
+    """Match direction tokens, not patient identifiers or export-reference suffixes."""
+    name = unicodedata.normalize("NFKC", value or "").lower().split("posdisp", 1)[0]
+    name = re.sub(r"(t[12]w?|flair)(?=o?(?:sag|cor|ax)|tra)", r"\1 ", name)
+    return {
+        plane
+        for plane, pattern in (
+            ("sag", r"(?<![a-z])(?:osag|sag(?:ittal)?)(?![a-z])"),
+            ("cor", r"(?<![a-z])(?:ocor|cor(?:onal)?)(?![a-z])"),
+            ("tra", r"(?<![a-z])(?:oax|ax(?:ial)?|tra(?:nsverse)?)(?![a-z])"),
+        )
+        if re.search(pattern, name)
+    }
+
+
 def named_target_plane(record: SeriesRecord, modality: str) -> str | None:
     """Protocol-name hint only, never evidence of physical acquisition orientation."""
     hints = set()
@@ -65,17 +80,11 @@ def named_target_plane(record: SeriesRecord, modality: str) -> str | None:
         )
         if not target:
             continue
-        name = re.sub(r"t1w?", "t1 ", name)
-        for plane, pattern in (
-            ("sag", r"(?<![a-z])(?:osag|sag(?:ittal)?)(?![a-z])"),
-            ("tra", r"(?<![a-z])(?:oax|tra(?:nsverse)?)(?![a-z])"),
-        ):
-            if re.search(pattern, name):
-                hints.add(plane)
+        hints.update(name_plane_hints(name))
     return next(iter(hints)) if len(hints) == 1 else None
 
 
-def default_classification(record: SeriesRecord) -> dict:
+def default_classification(record: SeriesRecord, *, version: str = CLASSIFICATION_VERSION) -> dict:
     """Pure name/timing suggestion. Never modifies source identity or manual decisions."""
     names = [
         unicodedata.normalize("NFKC", value or "").lower()
@@ -101,9 +110,14 @@ def default_classification(record: SeriesRecord) -> dict:
     projection = any(t in name for name in tokens for t in EXCLUDED_TOKENS) or any(
         token in normalized_text(*record.image_type) for token in EXCLUDED_TOKENS
     )
+    planes = set().union(*(name_plane_hints(name) for name in names))
+    rejected_plane = next((p for p in ("sag", "cor") if p in planes), None)
     if source_modality != "MR" or hit or projection:
         excluded, confidence = True, "high"
         reason = "non_target_" + (hit or ("projection" if projection else source_modality.lower()))
+    elif version == CLASSIFICATION_VERSION and rejected_plane:
+        excluded, confidence = True, "high"
+        reason = "non_target_" + {"sag": "sagittal_name", "cor": "coronal_name"}[rejected_plane]
     elif any("t1" in name and "flair" in name for name in compact):
         modality, confidence, reason = "t1", "high", "name_t1_and_flair"
     elif any(_t2_dark_fluid(name) for name in compact):
@@ -122,7 +136,7 @@ def default_classification(record: SeriesRecord) -> dict:
         "reason": reason,
         "excluded": excluded,
         "non_target_type": {"xa_dsa": "DSA", "ct": "CT"}.get(hit, ""),
-        "version": CLASSIFICATION_VERSION,
+        "version": version,
     }
 
 

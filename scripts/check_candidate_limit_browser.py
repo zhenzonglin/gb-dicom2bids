@@ -28,9 +28,17 @@ def check(output: Path, channel: str | None) -> None:
             output / "demo",
             negative=True,
             sequences={
-                "phantom01": [*repeated("T1 tra", 3), "FLAIR"],
-                "phantom02": [*repeated("T1 tra", 4), "FLAIR"],
-                "phantom03": ["T1 tra", *repeated("FLAIR", 4)],
+                "phantom01": [
+                    *repeated("T1 AX", 3),
+                    "FLAIR AX",
+                    "T1 SAG",
+                    "T1 COR",
+                    "FLAIR SAG",
+                    "FLAIR COR",
+                    "T1 AX COR",
+                ],
+                "phantom02": [*repeated("T1 AX", 4), "FLAIR AX"],
+                "phantom03": ["T1 AX", *repeated("FLAIR", 4)],
             },
         )
     )
@@ -91,6 +99,16 @@ def check(output: Path, channel: str | None) -> None:
                 expect(page.locator("#next-stage")).to_be_enabled()
                 page.locator("#next-stage").click()
                 expect(page.locator("#workflow-status")).to_contain_text("阶段 2")
+                page.locator("#subjects .subject").filter(has_text="phantom01").first.click()
+                expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
+                expect(page.locator(".pane-head select")).to_have_count(2)
+                expect(page.locator(".pane-head select").first).not_to_contain_text("SAG")
+                expect(page.locator(".pane-head select").first).not_to_contain_text("COR")
+                page.locator("#others").check()
+                expect(page.locator(".pane-head select").first).to_contain_text("SAG")
+                expect(page.locator(".pane-head select").first).to_contain_text("COR")
+                page.screenshot(path=str(output / "excluded-planes-available.png"), full_page=True)
+                page.locator("#others").uncheck()
                 second = page.locator("#subjects .subject").filter(has_text="phantom02")
                 second.click()
                 expect(page.locator("#subject-title")).to_have_text("sub-phantom02")
@@ -120,6 +138,7 @@ def check(output: Path, channel: str | None) -> None:
                             "no automatic preview",
                             "reload",
                             "quality queue isolation",
+                            "SAG/COR hidden by default but available for correction",
                             "no quality decision",
                             "no source or BIDS writes",
                         ],

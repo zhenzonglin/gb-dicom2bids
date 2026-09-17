@@ -40,13 +40,17 @@ failure, that round is technically skipped. Untried files, temporary I/O failure
 holds do not qualify. The recovery queue retains all images and logs for retry; no quality
 decision or cross-patient exclusion rule is created.
 For T1 and FLAIR independently, an available axial candidate finishes sequence identification
-without resolving other candidates first. OAx/TRA name hints are axial and OSag/SAG hints sagittal,
-with intervening text allowed. Multiple axial images are ordered naturally by source folder,
+without resolving other candidates first. AX/OAx/TRA name hints are axial. SAG/OSag and COR/OCor
+direction tokens default to excluded, even if AX also occurs; exclusion wins. These images stay
+available under all sequences, not in the default review/quality queue. Ordinary words such as
+correction, cortex and relax are not direction tokens; PosDisp reference suffixes are ignored.
+AX alone does not invent a T1/FLAIR modality or override CT/XA/DWI exclusions.
+Multiple axial images are ordered naturally by source folder,
 then filename, and the last one is selected (image10 follows image2). This is deterministic
 ordering, not acquisition chronology or quality ranking. Existing human final choices, explicit
 rankings, exclusions and holds remain authoritative. Other images remain available for correction.
 One normalized name field having **four or more candidate images in that patient** still overrides
-the automatic axial preference.
+the automatic axial preference. Automatically excluded SAG/COR images do not count toward it.
 At this fixed, inclusive limit, only the triggering modality is skipped, including its other
 fields; the other modality remains independent. Different fields and patients are not summed.
 Saved human final decisions are preserved. This workload exclusion is not a quality failure.

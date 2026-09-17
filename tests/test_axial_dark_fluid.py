@@ -78,7 +78,7 @@ def test_unique_axial_finishes_only_identification(tmp_path, axial, sag, modalit
     index, identify = make_missing(tmp_path, {"phantom01": [axial, sag, other]})
     choice = index.choices("phantom01")[modality]
     assert index.records[choice["choice"]].series_description == axial
-    assert choice["count"] == 2
+    assert choice["count"] == 1
     assert identify.summary()["counts"][modality]["automatic_unique"] == 1
     assert not identify.state["templates"]
     assert not list((index.root.parent / "subjects").glob("*.json"))

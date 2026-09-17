@@ -52,7 +52,7 @@ def test_no_cross_field_or_patient_identity_plane_inference(record_factory):
     assert named_t1_plane(record) is None
 
 
-def test_unique_tra_finishes_identification_preserving_sag_and_source(tmp_path):
+def test_unique_tra_finishes_identification_excluding_sag_without_changing_source(tmp_path):
     index, identify = make_missing(
         tmp_path,
         {
@@ -67,14 +67,14 @@ def test_unique_tra_finishes_identification_preserving_sag_and_source(tmp_path):
     assert identify.summary()["counts"]["t1"]["pending_subjects"] == 1
     for subject in ("phantom01", "phantom02"):
         choices = index.choices(subject)["t1"]
-        assert choices["count"] == 2 and choices["top_count"] == 1
+        assert choices["count"] == 1 and choices["top_count"] == 1
         assert identify.name_planes[choices["choice"]] == "tra"
         assert choices["selection_reason"] == "t1_axial_last"
         group = next(g for g in identify.subject_groups(subject) if g["modality"] == "t1")
         assert group["default_selection_reason"] == "t1_axial_last"
-        assert sorted(t["priority"] for t in group["templates"]) == [0, 100]
+        assert sorted(t["priority"] for t in group["templates"]) == [0]
         assert all(
-            index.assignment(u)["modality"] == "t1"
+            index.assignment(u)["default_excluded"]
             for u in index.subjects[subject]
             if identify.name_planes[u] == "sag"
         )
@@ -118,7 +118,7 @@ def test_same_name_tra_repeats_remain_multiple_images(tmp_path):
     fresh = ProtocolIndex(index.config).identification
     fresh.enable()
     choice = fresh.index.choices("phantom01")["t1"]
-    assert choice["count"] == 3 and choice["top_count"] == 1
+    assert choice["count"] == 2 and choice["top_count"] == 1
     assert fresh.index.records[choice["choice"]].source_relpaths[0].endswith("repeat.nii.gz")
     assert fresh.summary()["counts"]["t1"]["pending_subjects"] == 0
     assert fresh.summary()["counts"]["t1"]["automatic_unique"] == 1
@@ -130,6 +130,7 @@ def test_manual_choice_preserved_but_other_candidate_guards_do_not_block(tmp_pat
     sag = next(u for u in index.subjects["phantom01"] if identify.name_planes[u] == "sag")
     if protection == "rule":
         p = payload_for(identify, "t1")
+        p["templates"][identify.families[sag]] = {"modality": "t1", "priority": 0}
         for f, entry in p["templates"].items():
             entry["priority"] = 0 if f == identify.families[sag] else 100
         publish(identify, p)

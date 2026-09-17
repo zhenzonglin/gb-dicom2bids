@@ -55,7 +55,7 @@ def test_folder_then_filename_natural_last_is_stable_and_visible(tmp_path, modal
     chosen = index.choices("phantom01")[modality]
     uid = chosen["choice"]
     assert index.records[uid].source_relpaths == [paths[2]]
-    assert chosen["top_count"] == 1 and chosen["count"] == 4
+    assert chosen["top_count"] == 1 and chosen["count"] == 3
     assert index.identification.summary()["counts"][modality]["pending_subjects"] == 0
     index.subjects["phantom01"].reverse()
     index.identification.invalidate()

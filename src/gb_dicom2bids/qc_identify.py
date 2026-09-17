@@ -59,6 +59,8 @@ def require_quality(root):
         raise ValueError("清单已变化，请重新运行 catalog 并完成序列识别")
     if state and state.get("candidate_limit_version") != CANDIDATE_LIMIT_VERSION:
         raise ValueError("候选数量规则已更新，请先运行 catalog 并完成序列识别")
+    if state and state.get("defaults_version") != CLASSIFICATION_VERSION:
+        raise ValueError("默认序列规则已更新，请先运行 catalog 并完成序列识别")
 
 
 class Identification:
@@ -89,6 +91,7 @@ class Identification:
         self._exclusions = None
         self._readable = {}
         self.defaults = {u: default_classification(r) for u, r in index.records.items()}
+        self._legacy_defaults = {}
         self.name_planes = {u: named_target_plane(r, "t1") for u, r in index.records.items()}
         self.flair_planes = {u: named_target_plane(r, "flair") for u, r in index.records.items()}
         self._edit_bases = {}
@@ -236,6 +239,7 @@ class Identification:
         self._candidate_limits = {}
         self._candidate_limit_state = None
         self._edit_bases = {}
+        self._legacy_defaults = {}
 
     def defaults_enabled(self, state=None):
         return (self.state if state is None else state).get("defaults_version") in {
@@ -243,6 +247,7 @@ class Identification:
             "sequence-defaults-3",
             "sequence-defaults-4",
             "sequence-defaults-5",
+            "sequence-defaults-6",
             CLASSIFICATION_VERSION,
         }
 
@@ -252,7 +257,7 @@ class Identification:
     def axial_selection_reason(self, modality: str, state: dict) -> str:
         suffix = (
             "axial_last"
-            if state.get("defaults_version") == CLASSIFICATION_VERSION
+            if state.get("defaults_version") in {"sequence-defaults-6", CLASSIFICATION_VERSION}
             else "tra_over_sag"
         )
         return f"{modality}_{suffix}"
@@ -265,10 +270,12 @@ class Identification:
             "sequence-defaults-3",
             "sequence-defaults-4",
             "sequence-defaults-5",
+            "sequence-defaults-6",
             CLASSIFICATION_VERSION,
         } or (
             modality == "flair"
-            and state.get("defaults_version") not in {"sequence-defaults-5", CLASSIFICATION_VERSION}
+            and state.get("defaults_version")
+            not in {"sequence-defaults-5", "sequence-defaults-6", CLASSIFICATION_VERSION}
         ):
             return []
         decision = self.index.decisions[subject]
@@ -291,7 +298,7 @@ class Identification:
         _, scope = self.exclusions(state).scope(subject, modality)
         planes = self.name_planes if modality == "t1" else self.flair_planes
         axial = [u for u in candidates if planes[u] == "tra"]
-        if state.get("defaults_version") == CLASSIFICATION_VERSION:
+        if state.get("defaults_version") in {"sequence-defaults-6", CLASSIFICATION_VERSION}:
             # Keep deliberate human rankings and holds, not automatic candidate guards.
             if any(
                 state.get("templates", {}).get(self.families[u], {}).get("priority", 100) != 100
@@ -363,9 +370,20 @@ class Identification:
                 if known or missing or manual.get("choice") or manual.get("none"):
                     retained[key] = {"stamp": self.subject_stamp(subject), "source": "manual"}
 
+    def default_for(self, uid, state):
+        version = state.get("defaults_version", CLASSIFICATION_VERSION)
+        if version == CLASSIFICATION_VERSION:
+            return self.defaults[uid]
+        key = uid, version
+        if key not in self._legacy_defaults:
+            self._legacy_defaults[key] = default_classification(
+                self.index.records[uid], version=version
+            )
+        return self._legacy_defaults[key]
+
     def default_excluded(self, uid, state=None):
         state = self.state if state is None else state
-        if not self.defaults_enabled(state) or not self.defaults[uid]["excluded"]:
+        if not self.defaults_enabled(state) or not self.default_for(uid, state)["excluded"]:
             return False
         record = self.index.records[uid]
         rating = self.index.decisions[record.subject_id].get("candidates", {}).get(uid)
@@ -437,7 +455,7 @@ class Identification:
         rating = self.index.decisions[record.subject_id].get("candidates", {}).get(uid)
         manual = explicit(rating)
         default = (
-            self.defaults[uid]
+            self.default_for(uid, state)
             if self.defaults_enabled(state)
             else {
                 "modality": record.candidate_type,

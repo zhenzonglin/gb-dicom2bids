@@ -49,7 +49,7 @@ function displayWorkflow(value){
     ?`阶段 1 · 序列识别：T1 待识别 ${t.pending_groups} 组 / ${t.pending_subjects} 人；FLAIR 待识别 ${f.pending_groups} 组 / ${f.pending_subjects} 人。此阶段不判断图像质量。`
     :'阶段 2 · 质量检查：序列识别已完成。质量逐幅判断，不从代表病例复制。';
   $('#default-summary').textContent+=` 同字段 ≥4 自动跳过 T1 ${t.candidate_limit_skipped??0} / FLAIR ${f.candidate_limit_skipped??0} 人。仅跳过触发模态。`;
-  $('#default-summary').textContent+=' 有轴位直接优先；多幅轴位按原文件夹名、文件名自然排序，选最后一幅。';
+  $('#default-summary').textContent+=' SAG/COR 默认排除，AX/OAx/TRA 直接识别；多幅轴位按原文件夹名、文件名自然排序选最后一幅。不代表质量通过。';
   $('#next-stage').textContent=identifying()?'序列识别完成，进入质量检查':'返回序列识别（暂停质量授权）';
   $('#next-stage').disabled=identifying()&&value.pending_groups>0;
   for(const option of $('#assist-queue').options){

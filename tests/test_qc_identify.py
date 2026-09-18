@@ -166,7 +166,7 @@ def test_missing_is_confirmed_per_subject_not_propagated_as_quality_failure(tmp_
     assert not read_decision(index.root.parent, p["subject"])["groups"]
 
 
-def test_duplicate_same_protocol_remains_quality_comparison(tmp_path):
+def test_duplicate_same_protocol_defaults_to_last_but_manual_comparison_is_preserved(tmp_path):
     index, identify = make_index(tmp_path)
     original = next(r for r in index.records.values() if r.candidate_type == "flair")
     other = replace(original, series_uid_hash="repeat")
@@ -181,7 +181,9 @@ def test_duplicate_same_protocol_remains_quality_comparison(tmp_path):
     identify = Identification(index)
     index.identification = identify
     group = next(g for g in identify.catalogue()["groups"] if g["modality"] == "flair")
-    assert group["needs_protocol"] and group["repeat_subjects"] == 1
+    assert not group["needs_protocol"] and group["repeat_subjects"] == 1
+    assert index.choices(original.subject_id)["flair"]["choice"]
+    assert index.choices(original.subject_id)["flair"]["selection_reason"] == "flair_same_name_last"
     publish(identify, payload_for(identify, "flair"))
     group = next(g for g in identify.catalogue()["groups"] if g["modality"] == "flair")
     assert not group["needs_protocol"]  # Human confirms the protocol; no image is auto-chosen.

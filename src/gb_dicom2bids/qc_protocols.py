@@ -193,7 +193,7 @@ class ProtocolIndex:
             winners = [u for u in candidates if values[u]["priority"] == best]
             preference = []
             if self.identification and rule is None:
-                preference = self.identification.preferred_axial(
+                preference, reason = self.identification.preferred_candidates(
                     subject, modality, self.identification.state, values
                 )
                 if preference:
@@ -204,9 +204,7 @@ class ProtocolIndex:
                 "top_count": len(winners),
             }
             if preference:
-                result[modality]["selection_reason"] = self.identification.axial_selection_reason(
-                    modality, self.identification.state
-                )
+                result[modality]["selection_reason"] = reason
         return result
 
     def conflicts(self, gid: str, rule: dict | None = None) -> list[dict]:

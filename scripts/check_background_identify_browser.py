@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import secrets
 import threading
 from http.server import ThreadingHTTPServer
@@ -79,6 +80,8 @@ def check(output: Path, channel: str | None) -> None:
                 page.get_by_role("spinbutton", name="协议优先级").nth(1).fill("1")
                 page.locator("#identify-publish").click()
                 expect(page.locator("#subject-title")).not_to_have_text(second)
+                # Navigation briefly clears the title before the next subject arrives.
+                expect(page.locator("#subject-title")).to_have_text(re.compile(r"^sub-phantom"))
                 third = page.locator("#subject-title").inner_text()
                 expect(page.locator("#identification-job-status")).to_contain_text("排队/写入 2")
                 page.screenshot(path=str(output / "next-before-write-finishes.png"), full_page=True)

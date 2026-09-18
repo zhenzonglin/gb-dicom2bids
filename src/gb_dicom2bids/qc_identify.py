@@ -9,7 +9,12 @@ from collections import Counter, defaultdict
 
 from nibabel.filebasedimages import ImageFileError
 
-from .classify import CLASSIFICATION_VERSION, default_classification, named_target_plane
+from .classify import (
+    CLASSIFICATION_VERSION,
+    default_classification,
+    named_t2_flair_variant,
+    named_target_plane,
+)
 from .models import SeriesRecord
 from .qc_exclusions import ExclusionView
 from .qc_images import check_image
@@ -94,6 +99,7 @@ class Identification:
         self._legacy_defaults = {}
         self.name_planes = {u: named_target_plane(r, "t1") for u, r in index.records.items()}
         self.flair_planes = {u: named_target_plane(r, "flair") for u, r in index.records.items()}
+        self.flair_variants = {u: named_t2_flair_variant(r) for u, r in index.records.items()}
         self._edit_bases = {}
         self._subject_stamps = {}
         self._review_cache = None
@@ -248,6 +254,7 @@ class Identification:
             "sequence-defaults-4",
             "sequence-defaults-5",
             "sequence-defaults-6",
+            "sequence-defaults-7",
             CLASSIFICATION_VERSION,
         }
 
@@ -257,7 +264,8 @@ class Identification:
     def axial_selection_reason(self, modality: str, state: dict) -> str:
         suffix = (
             "axial_last"
-            if state.get("defaults_version") in {"sequence-defaults-6", CLASSIFICATION_VERSION}
+            if state.get("defaults_version")
+            in {"sequence-defaults-6", "sequence-defaults-7", CLASSIFICATION_VERSION}
             else "tra_over_sag"
         )
         return f"{modality}_{suffix}"
@@ -271,11 +279,17 @@ class Identification:
             "sequence-defaults-4",
             "sequence-defaults-5",
             "sequence-defaults-6",
+            "sequence-defaults-7",
             CLASSIFICATION_VERSION,
         } or (
             modality == "flair"
             and state.get("defaults_version")
-            not in {"sequence-defaults-5", "sequence-defaults-6", CLASSIFICATION_VERSION}
+            not in {
+                "sequence-defaults-5",
+                "sequence-defaults-6",
+                "sequence-defaults-7",
+                CLASSIFICATION_VERSION,
+            }
         ):
             return []
         decision = self.index.decisions[subject]
@@ -298,7 +312,11 @@ class Identification:
         _, scope = self.exclusions(state).scope(subject, modality)
         planes = self.name_planes if modality == "t1" else self.flair_planes
         axial = [u for u in candidates if planes[u] == "tra"]
-        if state.get("defaults_version") in {"sequence-defaults-6", CLASSIFICATION_VERSION}:
+        if state.get("defaults_version") in {
+            "sequence-defaults-6",
+            "sequence-defaults-7",
+            CLASSIFICATION_VERSION,
+        }:
             # Keep deliberate human rankings and holds, not automatic candidate guards.
             if any(
                 state.get("templates", {}).get(self.families[u], {}).get("priority", 100) != 100
@@ -328,6 +346,89 @@ class Identification:
         if {planes[u] for u in candidates} != {"sag", "tra"}:
             return []
         return axial
+
+    def automatic_candidates(
+        self, subject: str, modality: str, state: dict, values: dict
+    ) -> list[str]:
+        """New tie-breaks never replace a saved human rule, decision or hold."""
+        if state.get("defaults_version") != CLASSIFICATION_VERSION:
+            return []
+        key = f"{subject}:{modality}"
+        decision = self.index.decisions[subject]
+        manual = decision.get("groups", {}).get(modality, {})
+        retained = state.get("manual_completed", {}).get(key, {})
+        if (
+            manual.get("choice")
+            or manual.get("none")
+            or key in state.get("recheck", {})
+            or key in state.get("absent", {})
+            or (retained and retained.get("stamp") == self.subject_stamp(subject))
+        ):
+            return []
+        candidates = [
+            u
+            for u, a in values.items()
+            if a["modality"] == modality
+            and not a["default_excluded"]
+            and modality not in a.get("excluded_modalities", [])
+        ]
+        _, scope = self.exclusions(state).scope(subject, modality)
+        if any(
+            values[u]["classification_source"] != "default"
+            or u in scope.get("deferred", [])
+            or self.families[u] in scope.get("templates", {})
+            for u in candidates
+        ):
+            return []
+        return candidates
+
+    def last_per_family(self, candidates: list[str]) -> list[str]:
+        families = defaultdict(list)
+        for uid in candidates:
+            families[self.families[uid]].append(uid)
+        return [
+            max(ids, key=lambda u: axial_candidate_order(self.index.records[u]))
+            for _, ids in sorted(families.items())
+        ]
+
+    def preferred_et2_flair(self, subject: str, state: dict, values: dict) -> list[str]:
+        candidates = self.automatic_candidates(subject, "flair", state, values)
+        enhanced = [u for u in candidates if self.flair_variants[u] == "et2"]
+        if not enhanced or not any(self.flair_variants[u] == "t2" for u in candidates):
+            return []
+        # Do not use this new preference to hide a known failed preview.
+        if any(u in self.failed_previews for u in enhanced):
+            return []
+        axial = [u for u in enhanced if self.flair_planes[u] == "tra"]
+        return (
+            [max(axial, key=lambda u: axial_candidate_order(self.index.records[u]))]
+            if axial
+            else self.last_per_family(enhanced)
+        )
+
+    def preferred_candidates(
+        self, subject: str, modality: str, state: dict, values: dict | None = None
+    ) -> tuple[list[str], str]:
+        values = (
+            values
+            if values is not None
+            else {u: self.assignment(u, state) for u in self.index.subjects[subject]}
+        )
+        if modality == "flair":
+            preferred = self.preferred_et2_flair(subject, state, values)
+            if preferred:
+                return preferred, "flair_et2_over_t2"
+        preferred = self.preferred_axial(subject, modality, state, values)
+        if preferred:
+            return preferred, self.axial_selection_reason(modality, state)
+        candidates = self.automatic_candidates(subject, modality, state, values)
+        if any(u in self.failed_previews for u in candidates):
+            return [], ""
+        preferred = self.last_per_family(candidates)
+        # Distinct protocols stay distinct. The >= 4 field cap ran before this point.
+        if len(preferred) < len(candidates):
+            return preferred, f"{modality}_same_name_last"
+        return [], ""
 
     def subject_stamp(self, subject):
         if subject not in self._subject_stamps:
@@ -507,7 +608,7 @@ class Identification:
             center = self.index.records[uids[0]].center
             values = {u: self.assignment(u, state) for u in uids}
             for modality in ("t1", "flair"):
-                preferred_axial = self.preferred_axial(subject, modality, state, values)
+                preferred, _ = self.preferred_candidates(subject, modality, state, values)
                 candidates = [
                     u
                     for u in uids
@@ -548,8 +649,8 @@ class Identification:
                     self.assignment(u, state)["default_classification"]["confidence"] == "high"
                     for u in candidates
                 )
-                if preferred_axial:
-                    automatic = len(preferred_axial) == 1
+                if preferred:
+                    automatic = len(preferred) == 1
                 missing_done = f"{subject}:{modality}" in state.get("absent", {})
                 remaining = exclusions.round(subject, modality)
                 negative_done = bool(scope) and not exclusions.round(
@@ -560,15 +661,15 @@ class Identification:
                 # Once target protocols are settled, optional non-target images
                 # cannot keep this participant in the identification queue. Preserve
                 # their saved defers/errors; only target issues still block completion.
-                relevant = preferred_axial or (candidates if target_identified else remaining)
+                relevant = preferred or (candidates if target_identified else remaining)
                 deferred = bool(set(relevant) & set(scope.get("deferred", []))) or bool(
-                    not preferred_axial and scope and set(relevant) & self.failed_previews
+                    not preferred and scope and set(relevant) & self.failed_previews
                 )
                 recheck = f"{subject}:{modality}" in state.get("recheck", {})
                 conflicted = any(
                     self.families[u] in scope.get("templates", {})
                     and exclusions.positive(u, modality)
-                    for u in (preferred_axial or uids)
+                    for u in (preferred or uids)
                 )
                 if negative_done and subject not in scope.get("reviewed_subjects", []):
                     group["auto_skipped_subjects"] += 1
@@ -634,11 +735,11 @@ class Identification:
                     }
                 )
             group.update(exclusions.annotations(group))
-            preferred = self.preferred_axial(group["representative"], group["modality"], state)
-            preferred_families = {self.families[u] for u in preferred}
-            group["default_selection_reason"] = (
-                self.axial_selection_reason(group["modality"], state) if preferred else ""
+            preferred, reason = self.preferred_candidates(
+                group["representative"], group["modality"], state
             )
+            preferred_families = {self.families[u] for u in preferred}
+            group["default_selection_reason"] = reason
             group["templates"] = []
             for family in group["families"]:
                 sample = self.index.records[self.members[family][0]]

@@ -49,8 +49,14 @@ Multiple axial images are ordered naturally by source folder,
 then filename, and the last one is selected (image10 follows image2). This is deterministic
 ordering, not acquisition chronology or quality ranking. Existing human final choices, explicit
 rankings, exclusions and holds remain authoritative. Other images remain available for correction.
+Without saved human rules or decisions, coexisting eT2(W) FLAIR and T2(W) FLAIR candidates
+prefer eT2 FLAIR. Matching is case-insensitive and accepts spaces, hyphens and underscores.
+For both T1 and FLAIR, two or three same-name images also use natural-last order without
+requiring an axial name hint. Names use the existing normalized sequence family, not geometry;
+different protocols stay distinct. The eT2 preference runs first, then same-name/axial selection
+within its preferred pool. No source image is removed and no quality pass is written.
 One normalized name field having **four or more candidate images in that patient** still overrides
-the automatic axial preference. Automatically excluded SAG/COR images do not count toward it.
+the automatic eT2, axial and same-name preferences. Automatically excluded SAG/COR images do not count toward it.
 At this fixed, inclusive limit, only the triggering modality is skipped, including its other
 fields; the other modality remains independent. Different fields and patients are not summed.
 Saved human final decisions are preserved. This workload exclusion is not a quality failure.

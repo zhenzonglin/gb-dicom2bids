@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-7"
+CLASSIFICATION_VERSION = "sequence-defaults-8"
 
 T1_KEYWORDS = (
     "t1",
@@ -46,6 +46,19 @@ def compact_text(*values: str) -> str:
 
 def named_t1_plane(record: SeriesRecord) -> str | None:
     return named_target_plane(record, "t1")
+
+
+def named_t2_flair_variant(record: SeriesRecord) -> str | None:
+    """Recognize eT2(W)/T2(W) and FLAIR within one name, never across records."""
+    variants = set()
+    for value in (record.series_description, record.protocol_name, record.sequence_name):
+        name = unicodedata.normalize("NFKC", value or "").lower().split("posdisp", 1)[0]
+        if "flair" not in name or "t1" in compact_text(name):
+            continue
+        for match in re.finditer(r"(?<![a-z])(?P<e>e)?t2w?(?=$|[^a-z0-9]|flair)", name):
+            variants.add("et2" if match.group("e") else "t2")
+    # An exported eT2 folder may also have an ordinary T2 protocol-name alias.
+    return "et2" if "et2" in variants else "t2" if "t2" in variants else None
 
 
 def name_plane_hints(value: str) -> set[str]:
@@ -115,7 +128,7 @@ def default_classification(record: SeriesRecord, *, version: str = CLASSIFICATIO
     if source_modality != "MR" or hit or projection:
         excluded, confidence = True, "high"
         reason = "non_target_" + (hit or ("projection" if projection else source_modality.lower()))
-    elif version == CLASSIFICATION_VERSION and rejected_plane:
+    elif version in {"sequence-defaults-7", CLASSIFICATION_VERSION} and rejected_plane:
         excluded, confidence = True, "high"
         reason = "non_target_" + {"sag": "sagittal_name", "cor": "coronal_name"}[rejected_plane]
     elif any("t1" in name and "flair" in name for name in compact):

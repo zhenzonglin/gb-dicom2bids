@@ -39,6 +39,11 @@ def check(output: Path, channel: str | None) -> None:
                 ],
                 "phantom02": [*repeated("T1 AX", 4), "FLAIR AX"],
                 "phantom03": ["T1 AX", *repeated("FLAIR", 4)],
+                "phantom04": [
+                    *repeated("T1 SE", 3),
+                    *repeated("eT2 FLAIR", 3),
+                    "202001011200__MR__0009__T2 FLAIR",
+                ],
             },
         )
     )
@@ -87,7 +92,22 @@ def check(output: Path, channel: str | None) -> None:
                 )
                 # Three axial images now finish identification without any confirmation.
                 page.locator("#assist-queue").select_option("identified")
-                page.locator("#subjects .subject").filter(has_text="phantom01").first.click()
+                page.locator("#subjects .subject").filter(has_text="phantom04").filter(
+                    has_text="T1"
+                ).first.click()
+                expect(page.locator("#subject-title")).to_have_text("sub-phantom04")
+                preferred = service.subject("phantom04")["sequence_choices"]
+                assert "__0002__T1 SE" in service.records[preferred["t1"]].source_relpaths[0]
+                assert "__0002__eT2 FLAIR" in service.records[preferred["flair"]].source_relpaths[0]
+                expect(page.locator(".frame img[src]")).to_have_count(2)
+                displayed = page.locator(".pane-head select").evaluate_all(
+                    "nodes => nodes.map(node => node.value)"
+                )
+                page.screenshot(path=str(output / "same-name-last-identified.png"), full_page=True)
+                assert preferred["t1"] in displayed
+                page.locator("#subjects .subject").filter(has_text="phantom01").filter(
+                    has_text="T1"
+                ).first.click()
                 expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
                 selected = service.subject("phantom01")["sequence_choices"]["t1"]
                 assert "__0002__" in service.records[selected].source_relpaths[0]
@@ -99,6 +119,14 @@ def check(output: Path, channel: str | None) -> None:
                 expect(page.locator("#next-stage")).to_be_enabled()
                 page.locator("#next-stage").click()
                 expect(page.locator("#workflow-status")).to_contain_text("阶段 2")
+                page.locator("#subjects .subject").filter(has_text="phantom04").first.click()
+                expect(page.locator("#subject-title")).to_have_text("sub-phantom04")
+                expect(page.locator(".frame img[src]")).to_have_count(2)
+                displayed = page.locator(".pane-head select").evaluate_all(
+                    "nodes => nodes.map(node => node.value)"
+                )
+                assert set(preferred.values()).issubset(displayed)
+                page.screenshot(path=str(output / "et2-and-same-name-last.png"), full_page=True)
                 page.locator("#subjects .subject").filter(has_text="phantom01").first.click()
                 expect(page.locator("#subject-title")).to_have_text("sub-phantom01")
                 expect(page.locator(".pane-head select")).to_have_count(2)
@@ -139,6 +167,7 @@ def check(output: Path, channel: str | None) -> None:
                             "reload",
                             "quality queue isolation",
                             "SAG/COR hidden by default but available for correction",
+                            "eT2 preferred over T2; two or three same-name targets choose last",
                             "no quality decision",
                             "no source or BIDS writes",
                         ],

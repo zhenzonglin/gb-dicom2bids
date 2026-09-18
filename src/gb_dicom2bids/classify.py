@@ -6,7 +6,7 @@ import unicodedata
 
 from .models import SeriesRecord
 
-CLASSIFICATION_VERSION = "sequence-defaults-8"
+CLASSIFICATION_VERSION = "sequence-defaults-9"
 
 T1_KEYWORDS = (
     "t1",
@@ -128,11 +128,18 @@ def default_classification(record: SeriesRecord, *, version: str = CLASSIFICATIO
     if source_modality != "MR" or hit or projection:
         excluded, confidence = True, "high"
         reason = "non_target_" + (hit or ("projection" if projection else source_modality.lower()))
-    elif version in {"sequence-defaults-7", CLASSIFICATION_VERSION} and rejected_plane:
+    elif (
+        version in {"sequence-defaults-7", "sequence-defaults-8", CLASSIFICATION_VERSION}
+        and rejected_plane
+    ):
         excluded, confidence = True, "high"
         reason = "non_target_" + {"sag": "sagittal_name", "cor": "coronal_name"}[rejected_plane]
     elif any("t1" in name and "flair" in name for name in compact):
         modality, confidence, reason = "t1", "high", "name_t1_and_flair"
+    elif version == CLASSIFICATION_VERSION and any(
+        "t1" in name and "dark" in name for name in compact
+    ):
+        modality, confidence, reason = "t1", "high", "name_t1_and_dark"
     elif any(_t2_dark_fluid(name) for name in compact):
         modality, confidence, reason = "flair", "high", "name_t2_dark_fluid"
     elif any(k in name for name in compact for k in FLAIR_KEYWORDS):

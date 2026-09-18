@@ -121,6 +121,9 @@ def handler_class(service: ReviewService, token: str):
                                 "basis": identify.edit_basis(query["group"])
                                 if query.get("group")
                                 else None,
+                                "edit_context": identify.edit_context(query["group"])
+                                if query.get("group")
+                                else None,
                             }
                         self.json_response(200, result)
                 elif url.path == "/api/assist":

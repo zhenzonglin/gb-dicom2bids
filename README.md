@@ -30,7 +30,9 @@ The workflow now separates sequence identification from image quality: identify 
 protocols first, then explicitly enter quality review. Other sequences are optional correction
 sources, not required grouping fields. Existing human QC is preserved.
 Names containing both `t1` and `flair`, in either order and with arbitrary intervening text,
-default to T1. Other FLAIR names default to FLAIR. A single name containing `t2`, `dark` and
+default to T1. A single name containing both `t1` and `dark` also defaults to T1, including
+`T1 dark fluid` and `dark_extra_T1`. Other FLAIR names default to FLAIR. Without `t1`,
+a single name containing `t2`, `dark` and
 `fluid`, with intervening text allowed and in any order, also defaults to FLAIR; separate names
 are never joined to construct a match. XA (DSA in this project's exclusion category),
 CT, TOF, MRA, DWI, b0 and b1000 default to
@@ -69,6 +71,12 @@ confirmation durably queues the request and opens the next group while serial sa
 The status panel distinguishes pending, saved and failed requests; failures can return to their
 group for review. Queued requests survive restart; conflicting edits cannot overwrite current
 rules. Quality/archiving remains blocked until all pending requests finish.
+Independent T1 and FLAIR saves no longer invalidate each other; identical shared-template
+updates can converge, but a changed priority or manual decision remains protected. Prefetched
+pages are revalidated before opening. Equal-priority and known inclusion/exclusion conflicts
+are shown before navigating away. Recent failures are grouped and superseded by later successful
+submissions, not automatically reopened in the main queue. They remain available for explicit
+review and are never counted as identification complete; all original result files are retained.
 After a human confirms a round's
 templates are not the target modality, a frozen group reuses that negative evidence and shows
 only new templates. Manually deferred items remain pending. Preview failures alone never exclude

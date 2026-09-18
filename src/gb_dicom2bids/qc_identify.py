@@ -101,6 +101,7 @@ class Identification:
         self.flair_planes = {u: named_target_plane(r, "flair") for u, r in index.records.items()}
         self.flair_variants = {u: named_t2_flair_variant(r) for u, r in index.records.items()}
         self._edit_bases = {}
+        self._edit_contexts = {}
         self._subject_stamps = {}
         self._review_cache = None
         self._unreadable_groups = {}
@@ -245,6 +246,7 @@ class Identification:
         self._candidate_limits = {}
         self._candidate_limit_state = None
         self._edit_bases = {}
+        self._edit_contexts = {}
         self._legacy_defaults = {}
 
     def defaults_enabled(self, state=None):
@@ -255,6 +257,7 @@ class Identification:
             "sequence-defaults-5",
             "sequence-defaults-6",
             "sequence-defaults-7",
+            "sequence-defaults-8",
             CLASSIFICATION_VERSION,
         }
 
@@ -265,7 +268,12 @@ class Identification:
         suffix = (
             "axial_last"
             if state.get("defaults_version")
-            in {"sequence-defaults-6", "sequence-defaults-7", CLASSIFICATION_VERSION}
+            in {
+                "sequence-defaults-6",
+                "sequence-defaults-7",
+                "sequence-defaults-8",
+                CLASSIFICATION_VERSION,
+            }
             else "tra_over_sag"
         )
         return f"{modality}_{suffix}"
@@ -280,6 +288,7 @@ class Identification:
             "sequence-defaults-5",
             "sequence-defaults-6",
             "sequence-defaults-7",
+            "sequence-defaults-8",
             CLASSIFICATION_VERSION,
         } or (
             modality == "flair"
@@ -288,6 +297,7 @@ class Identification:
                 "sequence-defaults-5",
                 "sequence-defaults-6",
                 "sequence-defaults-7",
+                "sequence-defaults-8",
                 CLASSIFICATION_VERSION,
             }
         ):
@@ -315,6 +325,7 @@ class Identification:
         if state.get("defaults_version") in {
             "sequence-defaults-6",
             "sequence-defaults-7",
+            "sequence-defaults-8",
             CLASSIFICATION_VERSION,
         }:
             # Keep deliberate human rankings and holds, not automatic candidate guards.
@@ -351,7 +362,7 @@ class Identification:
         self, subject: str, modality: str, state: dict, values: dict
     ) -> list[str]:
         """New tie-breaks never replace a saved human rule, decision or hold."""
-        if state.get("defaults_version") != CLASSIFICATION_VERSION:
+        if state.get("defaults_version") not in {"sequence-defaults-8", CLASSIFICATION_VERSION}:
             return []
         key = f"{subject}:{modality}"
         decision = self.index.decisions[subject]
@@ -860,6 +871,77 @@ class Identification:
             )
         return self._edit_bases[gid]
 
+    def edit_context(self, gid: str) -> dict:
+        """Guard target scope and intended template writes, not the other modality's rules."""
+        if gid not in self._edit_contexts:
+            group, state = self.group(gid), self.state
+            subjects, modality = set(group["subjects"]), group["modality"]
+            families = {self.families[u] for s in subjects for u in self.index.subjects[s]}
+            scopes = {
+                k: v
+                for k, v in state.get("negative_scopes", {}).items()
+                if v["modality"] == modality and set(v["subjects"]) & subjects
+            }
+            self._edit_contexts[gid] = {
+                "version": 1,
+                "scope": fingerprint(
+                    {
+                        "inventory": self.loaded_inventory_stamp,
+                        "members": group["subjects"],
+                        "families": group["families"],
+                        "phase": state["phase"],
+                        "defaults": state.get("defaults_version"),
+                        "limit": state.get("candidate_limit_version"),
+                        "scopes": scopes,
+                        "decisions": {s: self.index.decisions[s] for s in sorted(subjects)},
+                        "holds": {
+                            name: {
+                                s: state.get(name, {}).get(f"{s}:{modality}")
+                                for s in sorted(subjects)
+                            }
+                            for name in ("absent", "recheck", "manual_completed")
+                        },
+                    }
+                ),
+                "templates": {
+                    f: fingerprint(state.get("templates", {}).get(f)) for f in sorted(families)
+                },
+                "blocked_templates": sorted(
+                    {
+                        f
+                        for scope in state.get("negative_scopes", {}).values()
+                        if scope["modality"] == modality
+                        for f in scope["templates"]
+                        if f in families
+                    }
+                ),
+            }
+        return self._edit_contexts[gid]
+
+    def edit_is_current(self, payload: dict) -> bool:
+        if payload.get("basis") == self.edit_basis(payload["group"]):
+            return True
+        previous = payload.get("edit_context")
+        if not isinstance(previous, dict) or previous.get("version") != 1:
+            return False  # Old durable jobs retain the original, stricter guard.
+        current = self.edit_context(payload["group"])
+        if previous.get("scope") != current["scope"]:
+            return False
+        hashes = previous.get("templates")
+        if not isinstance(hashes, dict):
+            return False
+        # Negative actions never write global modality assignments. Their frozen scope,
+        # holds and image-level positive conflicts are checked separately during preview.
+        return all(
+            family in hashes
+            and (
+                hashes[family] == current["templates"].get(family)
+                or self.state.get("templates", {}).get(family) == entry
+            )
+            for family, entry in payload.get("templates", {}).items()
+            if entry.get("modality") != "other"
+        )
+
     def list_subjects(self, filters):
         groups = self.catalogue()["groups"]
         if filters.get("queue") in {"unreadable", "candidate_limit"}:
@@ -896,9 +978,12 @@ class Identification:
             }
         pending = filters.get("queue") != "identified"
         groups = [g for g in groups if not pending or g["needs_protocol"]]
+        skipped = set(filters.get("skip_groups", "").split(",")) if pending else set()
         query, center = filters.get("q", "").lower(), filters.get("center", "").lower()
         rows = []
         for g in groups:
+            if g["id"] in skipped:
+                continue
             if center and center not in g["center"].lower():
                 continue
             if (

@@ -3,6 +3,17 @@ let identificationJobState={pending:[],recent:[]}, identificationJobTimer=null;
 let submittingIdentification=false, receiptDraft=null, jobStateSignature='';
 const identificationPrefetch=new Map();
 const pendingIdentificationGroups=()=>new Set(identificationJobState.pending.map(j=>j.group));
+function latestIdentificationFailures(){
+  const groups=new Set(),pairs=new Set(),failed=[];
+  for(const job of [...identificationJobState.pending,...identificationJobState.recent]){
+    const pair=job.subject+':'+job.modality;
+    if(groups.has(job.group)||pairs.has(pair))continue;
+    groups.add(job.group);pairs.add(pair);
+    if(job.state==='failed')failed.push(job);
+  }
+  return failed;
+}
+const pausedIdentificationGroups=()=>new Set([...pendingIdentificationGroups(),...latestIdentificationFailures().map(j=>j.group)]);
 
 function prefetchIdentification(id,group){
   if(!identificationPrefetch.has(group)){
@@ -15,19 +26,26 @@ function prefetchIdentification(id,group){
 }
 function prefetchNextIdentification(){
   if(!identifying()||$('#assist-queue').value!=='protocol')return;
-  const pending=pendingIdentificationGroups();
+  const pending=pausedIdentificationGroups();
   for(const row of listing.filter(s=>s.identification_group!==activeIdentificationGroup&&!pending.has(s.identification_group)).slice(0,2))prefetchIdentification(row.id,row.identification_group);
 }
-async function takeIdentificationPrefetch(group){
+async function takeIdentificationPrefetch(group,id){
   const pending=identificationPrefetch.get(group);
   identificationPrefetch.delete(group);
-  return pending?await pending:null;
+  const saved=pending?await pending:null;
+  if(!saved||saved.subject.subject!==id)return null;
+  // Revalidate cheap metadata before opening; never reuse an earlier rule snapshot.
+  try{
+    const latest=await api('/api/identify?group='+encodeURIComponent(group));
+    if(latest.basis===saved.snapshot.basis)return {...saved,snapshot:latest};
+  }catch{/* The group may have disappeared after another rule was committed. */}
+  return null;
 }
 function renderIdentificationJobs(){
   const panel=$('#identification-jobs');panel.hidden=!workflow?.enabled;
   const jobs=identificationJobState;
-  const failed=jobs.recent.filter(j=>j.state==='failed');
-  $('#identification-job-status').textContent=`后台保存：排队/写入 ${jobs.pending.length} · 最近已保存 ${jobs.recent.filter(j=>j.state==='completed').length} · 最近失败 ${failed.length}（最近 50 条结果）。排队不等于已保存。`;
+  const failed=latestIdentificationFailures();
+  $('#identification-job-status').textContent=`后台保存：排队/写入 ${jobs.pending.length} · 最近已保存 ${jobs.recent.filter(j=>j.state==='completed').length} · 最近待处理失败 ${failed.length}（最近 50 条结果，按组去重）。失败组暂不自动弹回，请点“返回该组复核”；不算识别完成。`;
   $('#identification-job-status').className=failed.length||jobs.error?'error':'';
   const details=$('#identification-job-details');details.replaceChildren();
   if(jobs.error)details.append(element('p','后台存储错误，待办记录保留：'+jobs.error,'error'));
@@ -72,8 +90,9 @@ async function pollIdentificationJobs(){
     await loadIdentificationJobs();
     const signature=JSON.stringify(identificationJobState.recent.map(j=>[j.id,j.state]));
     if(jobStateSignature&&signature!==jobStateSignature){
+      identificationPrefetch.clear();
       // Never replace the open draft or its basis with another revision's interpretation.
-      if(!current&&!dirty&&!submittingIdentification)await refreshList();
+      if(!dirty&&!submittingIdentification)await refreshList();
       else if(!identificationJobState.pending.length)await loadWorkflow();
     }
     jobStateSignature=signature;
@@ -100,15 +119,21 @@ async function sendIdentificationReceipt(){
     if(job.state==='failed')throw Error(job.error||'原请求保存失败，请返回该组复核');
     if(!identificationJobState.pending.some(j=>j.id===job.id)&&job.state!=='completed')identificationJobState.pending.push(job);
     dirty=false;identificationDraft=null;
+    if($('#assist-queue').value==='identified'){
+      $('#assist-queue').value='protocol';listing=[];offset=0;
+    }
     const group=raw.payload.group;
     listing=listing.filter(s=>s.identification_group!==group);
     for(const button of $('#subjects').children)if(button.dataset.group===group)button.remove();
     current=null;activeIdentificationGroup=null;generation++;
     clearImages($('#panes'));$('#panes').replaceChildren();$('#protocol-panel').hidden=true;
     $('#decision-bar').hidden=true;$('#subject-title').textContent='选择一位受试者';
-    const next=listing.find(s=>!pendingIdentificationGroups().has(s.identification_group));
+    const next=listing.find(s=>!pausedIdentificationGroups().has(s.identification_group));
     if(next)await openSubject(next.id,next.identification_group);
-    else $('#panes').append(element('section','本页已提交。后台保存完成后自动加载剩余待识别组。','empty'));
+    else {
+      $('#panes').append(element('section','本页已提交。正在加载其他组；保存失败请在后台任务中单独复核。','empty'));
+      await refreshList();
+    }
     message('操作已进入私有后台队列，正在保存；可继续下一组。请查看后台保存结果。');
   }catch(error){message('提交未完成：'+error.message,true);}
   finally{submittingIdentification=false;renderIdentificationJobs();}

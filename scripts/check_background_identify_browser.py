@@ -38,10 +38,13 @@ def check(output: Path, channel: str | None) -> None:
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    entered, release = threading.Event(), threading.Event()
+    entered, release, reject = threading.Event(), threading.Event(), threading.Event()
     original = Identification.publish
 
     def slow(self, payload):
+        if reject.is_set():
+            reject.clear()
+            raise ValueError("synthetic temporary publication failure")
         if payload.get("background_job_id") and not entered.is_set():
             entered.set()
             if not release.wait(40):
@@ -67,6 +70,8 @@ def check(output: Path, channel: str | None) -> None:
                 page.goto(url, wait_until="networkidle")
                 expect(page.locator("#identify-publish")).to_be_enabled()
                 first = page.locator("#subject-title").inner_text()
+                first_group = page.evaluate("activeIdentificationGroup")
+                page.evaluate("prefetchIdentification(current.subject,activeIdentificationGroup)")
                 # Distinct protocols need an explicit priority, but no preview click.
                 page.get_by_role("spinbutton", name="协议优先级").nth(0).fill("0")
                 page.get_by_role("spinbutton", name="协议优先级").nth(1).fill("1")
@@ -93,13 +98,35 @@ def check(output: Path, channel: str | None) -> None:
                 expect(page.locator("#identification-job-status")).to_contain_text(
                     "最近已保存 2", timeout=20000
                 )
-                # An unresolved equal-priority decision fails in the background, never disappears.
+                assert not page.evaluate("g=>identificationPrefetch.has(g)", first_group)
+                # A predictable priority error stays on the current patient, before queueing.
+                page.locator("#identify-publish").click()
+                expect(page.locator("#message")).to_contain_text("尚未提交")
+                expect(page.locator("#subject-title")).to_have_text(third)
+                assert len(service.identification_jobs().status()["recent"]) == 2
+                page.get_by_role("spinbutton", name="协议优先级").nth(0).fill("0")
+                page.get_by_role("spinbutton", name="协议优先级").nth(1).fill("1")
+                reject.set()
                 page.locator("#identify-publish").click()
                 expect(page.locator("#identification-job-status")).to_contain_text(
-                    "最近失败 1", timeout=20000
+                    "最近待处理失败 1", timeout=20000
                 )
                 page.locator("#identification-jobs details").evaluate("e => e.open = true")
-                expect(page.locator("#identification-job-details")).to_contain_text("同优先级")
+                expect(page.locator("#identification-job-details")).to_contain_text(
+                    "synthetic temporary"
+                )
+                expect(page.locator("#subject-title")).to_have_text("选择一位受试者")
+                expect(page.locator("#subjects .subject")).to_have_count(0)
+                assert (
+                    page.evaluate("""() => {
+                    const saved=identificationJobState;
+                    const failure=saved.recent.find(j=>j.state==='failed');
+                    identificationJobState={pending:[],recent:[failure,{...failure,id:'older'}]};
+                    const count=latestIdentificationFailures().length;
+                    identificationJobState=saved;return count;
+                }""")
+                    == 1
+                )
                 page.get_by_role("button", name="返回该组复核").click()
                 expect(page.locator("#subject-title")).to_have_text(third)
                 page.screenshot(
@@ -111,6 +138,10 @@ def check(output: Path, channel: str | None) -> None:
                 expect(page.locator("#identification-job-status")).to_contain_text(
                     "最近已保存 3", timeout=20000
                 )
+                expect(page.locator("#identification-job-status")).to_contain_text(
+                    "最近待处理失败 0"
+                )
+                expect(page.locator("#subjects .subject")).to_have_count(0)
                 assert not any(r.endswith("/api/identify/preview") for r in requests)
                 assert not errors, errors
                 assert not external, external
@@ -131,6 +162,10 @@ def check(output: Path, channel: str | None) -> None:
                             "two queued decisions",
                             "refresh persistence",
                             "disjoint revision rebase",
+                            "stale prefetch invalidation",
+                            "equal priority blocked before navigating",
+                            "failed groups do not automatically reopen",
+                            "repeated failures deduplicated and superseded by success",
                             "failure visible and recoverable",
                             "no quality propagation",
                             "no image writes",

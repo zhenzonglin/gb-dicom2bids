@@ -25,11 +25,13 @@ async function refreshList(preferredGroup=null){
       phase='正在加载患者列表';loading();
     }
     const params=new URLSearchParams({q:$('#search').value,queue:$('#assist-queue').value,center:$('#center').value,protocol:$('#protocol').value,status:$('#auto-status').value,reason:$('#reason-filter').value,pilot:$('#pilot').checked?'1':'0',pending:$('#pending').checked?'1':'0',others:$('#others').checked?'1':'0',offset});
+    if(identifying()&&$('#assist-queue').value==='protocol')params.set('skip_groups',[...pausedIdentificationGroups()].join(','));
     const data=await api('/api/subjects?'+params,undefined,controller.signal);
     if(request!==listGeneration)return;
     if(data.identification)displayWorkflow({...data.identification,enabled:true});
     clearInterval(tick);
-    listing=data.subjects.filter(s=>!pendingIdentificationGroups().has(s.identification_group));$('#total').textContent=data.total;$('#subjects').replaceChildren();
+    const skipped=$('#assist-queue').value==='protocol'?pausedIdentificationGroups():pendingIdentificationGroups();
+    listing=data.subjects.filter(s=>!skipped.has(s.identification_group));$('#total').textContent=data.total;$('#subjects').replaceChildren();
     for(const subject of listing){
       const button=element('button',subject.id,'subject'+(current?.subject===subject.id?' active':''));
       button.dataset.group=subject.identification_group||'';
@@ -39,7 +41,8 @@ async function refreshList(preferredGroup=null){
       if(subject.reason==='candidate_field_limit')button.lastChild.textContent='同字段 ≥4 · 仅此模态跳过，无需 QC';
       button.onclick=()=>openSubject(subject.id,subject.identification_group);$('#subjects').append(button);
     }
-    status.textContent=data.total?`列表已加载 · ${data.total} ${data.unit==='protocol_groups'?'个序列组':data.unit==='subject_modalities'?'个患者/模态':'名患者'}`:identifying()?'本队列无待识别组；可查看全部协议组纠错，或进入质量检查。':'当前筛选无匹配患者，请清除筛选条件。';
+    status.textContent=data.total?`列表已加载 · ${data.total} ${data.unit==='protocol_groups'?'个序列组':data.unit==='subject_modalities'?'个患者/模态':'名患者'}`:identifying()?'本队列暂无可自动打开的组；请检查后台保存状态。所有待识别组完成后才能进入质量检查。':'当前筛选无匹配患者，请清除筛选条件。';
+    if(identifying()&&$('#assist-queue').value==='protocol'&&latestIdentificationFailures().length)status.textContent+=` 另有 ${latestIdentificationFailures().length} 个近期保存问题，请在后台任务中单独复核；未算完成。`;
     if(!current&&listing.length){const first=listing.find(s=>s.identification_group===preferredGroup)||listing[0];await openSubject(first.id,first.identification_group);}
     message('队列已载入；自动推荐不是人工通过。');
   }catch(error){
@@ -49,7 +52,29 @@ async function refreshList(preferredGroup=null){
     message(status.textContent,true);
   }finally{clearInterval(tick);}
 }
-async function openSubject(id,groupId,loaded=null){if(dirty&&!confirm('当前决定尚未保存，确定放弃修改？'))return;try{const view=loaded||(groupId?await takeIdentificationPrefetch(groupId):null);current=view?.subject||await api('/api/subject?id='+encodeURIComponent(id));activeIdentificationGroup=groupId||null;identificationShowAll=false;identificationDeferred=new Set();identificationFailures=new Set();draft=structuredClone(current.decision);dirty=false;generation++;$('#subject-title').textContent='sub-'+id;$('#decision-bar').hidden=false;$('#reviewer').value=draft.reviewer||'zhenzong';for(const modality of ['t1','flair'])$('#none-reason-'+modality).value=draft.groups[modality]?.reason||'';renderPanes();if(workflow?.enabled)await renderIdentification(view?.snapshot);else renderAssistSubject();updateChoices();$('#revision').textContent=`记录版本 ${draft.revision}`;document.querySelectorAll('.subject').forEach(b=>b.classList.toggle('active',b.firstChild.textContent===id));prefetchNextIdentification();message('可逐层浏览。图像未准备时只准备当前候选，不写入BIDS。');}catch(error){message(error.message,true);}}
+async function openSubject(id,groupId,loaded=null){
+  if(dirty&&!confirm('当前决定尚未保存，确定放弃修改？'))return;
+  try{
+    const view=loaded||(groupId?await takeIdentificationPrefetch(groupId,id):null);
+    current=view?.subject||await api('/api/subject?id='+encodeURIComponent(id));
+    if(identifying()&&groupId&&$('#assist-queue').value==='protocol'){
+      const group=current.identification_groups.find(g=>g.id===groupId);
+      if(!group?.needs_protocol||!group.pending_subjects.includes(id)){
+        current=null;activeIdentificationGroup=null;dirty=false;
+        identificationPrefetch.clear();await refreshList(groupId);return;
+      }
+    }
+    activeIdentificationGroup=groupId||null;identificationShowAll=false;
+    identificationDeferred=new Set();identificationFailures=new Set();
+    draft=structuredClone(current.decision);dirty=false;generation++;
+    $('#subject-title').textContent='sub-'+id;$('#decision-bar').hidden=false;$('#reviewer').value=draft.reviewer||'zhenzong';
+    for(const modality of ['t1','flair'])$('#none-reason-'+modality).value=draft.groups[modality]?.reason||'';
+    renderPanes();if(workflow?.enabled)await renderIdentification(view?.snapshot);else renderAssistSubject();
+    updateChoices();$('#revision').textContent=`记录版本 ${draft.revision}`;
+    document.querySelectorAll('.subject').forEach(b=>b.classList.toggle('active',b.firstChild.textContent===id));
+    prefetchNextIdentification();message('可逐层浏览。图像未准备时只准备当前候选，不写入BIDS。');
+  }catch(error){message(error.message,true);}
+}
 function candidates(){if(identifying())return identificationCandidates();return current.candidates.filter(c=>{const mode=draft.candidates[c.id]?.modality||c.candidate_type;return $('#others').checked||(mode!=='other'&&!c.unreadable_excluded_modalities?.includes(mode)&&!c.candidate_limit_excluded_modalities?.includes(mode));}).sort((a,b)=>({selected:0,review:1,excluded:2}[a.auto_status]-{selected:0,review:1,excluded:2}[b.auto_status]));}
 function rating(candidate){return draft.candidates[candidate.id]||(draft.candidates[candidate.id]={quality:'unreviewed',modality:candidate.candidate_type,reason:''});}
 function clearImages(node){node.querySelectorAll('img[src^="blob:"]').forEach(img=>URL.revokeObjectURL(img.src));}

@@ -205,7 +205,7 @@ class IdentificationJobs:
                 payload = copy.deepcopy(job["payload"])
                 if identify.group(payload["group"])["modality"] != payload["target_modality"]:
                     raise ConflictError("目标模态与原识别组不一致，请刷新后重新确认")
-                if payload["basis"] != identify.edit_basis(payload["group"]):
+                if not identify.edit_is_current(payload):
                     raise ConflictError("本组或关联模板已改变，未覆盖已有规则；请返回该组重新确认")
                 payload.update(
                     revision=identify.state["revision"],

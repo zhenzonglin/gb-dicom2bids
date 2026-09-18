@@ -38,6 +38,7 @@ function identificationFailure(id){
 
 function displayWorkflow(value){
   if(workflow?.enabled&&value.enabled&&value.revision<workflow.revision)return;
+  if(workflow?.revision!==value.revision)identificationPrefetch.clear();
   workflow=value;
   document.body.classList.toggle('identifying',identifying());
   $('#workflow').hidden=!value.enabled;
@@ -50,6 +51,7 @@ function displayWorkflow(value){
     :'阶段 2 · 质量检查：序列识别已完成。质量逐幅判断，不从代表病例复制。';
   $('#default-summary').textContent+=` 同字段 ≥4 自动跳过 T1 ${t.candidate_limit_skipped??0} / FLAIR ${f.candidate_limit_skipped??0} 人。仅跳过触发模态。`;
   $('#default-summary').textContent+=' SAG/COR 默认排除，AX/OAx/TRA 直接识别；eT2/T2 FLAIR 同时存在时优先 eT2。同名 2–3 幅或多幅轴位按原文件夹名、文件名自然排序选最后一幅。人工规则优先，不代表质量通过。';
+  $('#default-summary').textContent+=' 同一个名称含 T1 和 FLAIR，或含 T1 和 dark，均归 T1；不含 T1 的 FLAIR / T2 dark fluid 才归 FLAIR。';
   $('#next-stage').textContent=identifying()?'序列识别完成，进入质量检查':'返回序列识别（暂停质量授权）';
   $('#next-stage').disabled=identifying()&&value.pending_groups>0;
   for(const option of $('#assist-queue').options){
@@ -102,6 +104,17 @@ async function renderIdentification(snapshot=null){
   for(const uid of group.failed_preview_candidates||[])identificationFailures.add(uid);
   const target=group.modality.toUpperCase();
   content.append(element('h3',`${target} 序列识别 · 同类 ${group.count} 人 · 待识别 ${group.pending_count} 人`));
+  if(!group.needs_protocol)content.append(element('p','本组当前已完成序列识别，无需重复确认；旧失败日志不代表当前仍未完成。仅在需要纠错时修改规则。','hint'));
+  if($('#assist-queue').value==='identified'){
+    const back=element('button','返回待识别队列');
+    back.onclick=async()=>{
+      if(dirty&&!confirm('当前修改未提交，确定放弃并返回队列？'))return;
+      dirty=false;current=null;activeIdentificationGroup=null;offset=0;
+      $('#assist-queue').value='protocol';$('#protocol-panel').hidden=true;
+      clearImages($('#panes'));$('#panes').replaceChildren();$('#decision-bar').hidden=true;
+      $('#subject-title').textContent='选择一位受试者';await refreshList();
+    };content.append(back);
+  }
   content.append(element('p','只确认序列归属与协议优先级。其他序列不参与分组；纠错时可从全部序列中选择。不同层数和体素保留在后续质量检查中。'));
   content.append(element('p',`有效 ${target} 候选归属明确、无目标候选冲突或待定时，该患者结束 ${target} 识别；无需继续排除无关序列。`,'hint'));
   content.append(element('p',`保留 ${target}、仅移出部分模板时，请在对应模板下拉框选择“不是 ${target}（移出候选）”，再直接确认应用。提交后进入下一组，后台完成写入；预览影响是可选操作。`,'hint'));
@@ -174,7 +187,7 @@ async function renderIdentification(snapshot=null){
   let payload=null;
   function invalidate(){payload=null;publish.disabled=false;dirty=true;identificationDraft=true;message('序列规则尚未提交；可直接确认应用，此操作不保存质量通过。');}
   reviewer.oninput=compare.onchange=invalidate;
-  const makePayload=()=>({group:group.id,subject:current.subject,revision:data.revision,basis:data.basis,target_modality:group.modality,
+  const makePayload=()=>({group:group.id,subject:current.subject,revision:data.revision,basis:data.basis,edit_context:data.edit_context,target_modality:group.modality,
     reviewer:reviewer.value,compare_in_quality:compare.checked,
     templates:Object.fromEntries([...entries].map(([id,e])=>[id,{modality:e.modality,priority:e.priority}]))});
   function buildPayload(action='positive'){
@@ -214,7 +227,20 @@ async function renderIdentification(snapshot=null){
     try{await queueIdentification(buildPayload('negative'));}catch(error){message(error.message,true);}
   };revoke.onclick=()=>doPreview('revoke');
   publish.onclick=async()=>{
-    try{await queueIdentification(payload||buildPayload());}catch(error){message(error.message,true);}
+    try{
+      const value=payload||buildPayload();
+      const positive=Object.entries(value.templates).filter(([,e])=>e.modality===group.modality);
+      const priorities=positive.map(([,e])=>e.priority),best=Math.min(...priorities);
+      if(priorities.filter(p=>p===best).length>1&&!value.compare_in_quality){
+        throw Error('尚未提交：多个协议同为最高优先级。请设置不同优先级（数字越小越优先），或勾选“留待质量阶段逐幅比较”，再确认。');
+      }
+      const blocked=positive.filter(([id])=>data.edit_context?.blocked_templates?.includes(id));
+      if(blocked.length){
+        const names=blocked.map(([id])=>entries.get(id)?.example_name||id);
+        throw Error('尚未提交：以下模板已有同模态排除规则，请在“规则回顾 / 撤销”撤回对应排除后重新打开本组：'+names.join('；'));
+      }
+      await queueIdentification(value);
+    }catch(error){message(error.message,true);}
   };
   drawRows();
   renderPanes();

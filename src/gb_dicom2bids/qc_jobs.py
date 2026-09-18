@@ -19,6 +19,21 @@ def assert_no_pending(root: Path) -> None:
         raise BusyError("序列识别仍有后台保存任务，请等待保存完成后再进入质量或归档")
 
 
+def _queue_sequence(job: dict) -> int:
+    if "queue_sequence" not in job:
+        return 0  # Legacy receipts have no recoverable same-second submission order.
+    sequence = job["queue_sequence"]
+    if type(sequence) is not int or sequence < 1:
+        raise ValueError("后台保存队列序号无效；保留队列，请检查序号记录")
+    return sequence
+
+
+def _queue_order(job: dict) -> tuple:
+    sequence = _queue_sequence(job)
+    # Drain legacy receipts first, preserving their historical timestamp/ID order.
+    return (1, sequence) if sequence else (0, job["submitted_at"], job["id"])
+
+
 class IdentificationJobs:
     """The publisher owns a separate index, so a slow write never locks the viewer index."""
 
@@ -45,6 +60,29 @@ class IdentificationJobs:
     @staticmethod
     def public(job: dict) -> dict:
         return {k: v for k, v in job.items() if k not in {"payload", "fingerprint", "inventory"}}
+
+    def _reserve_sequence(self) -> int:
+        """Caller holds .submit.lock across reservation AND durable receipt creation."""
+        path = self.root / "sequence.json"
+        if path.exists():
+            previous = read_json(path).get("last_sequence")
+            if type(previous) is not int or previous < 0:
+                raise ValueError("后台保存队列序号记录无效；保留队列，请检查 sequence.json")
+        else:
+            # Bootstrap once, including receipts retained after a missing counter.
+            # Ordinary submissions never scan the completed-results directory.
+            previous = max(
+                (
+                    _queue_sequence(read_json(p))
+                    for directory in (self.pending, self.results)
+                    for p in directory.glob("*.json")
+                ),
+                default=0,
+            )
+        sequence = previous + 1
+        # Reserve first: a failed receipt write may leave a gap, never a reused number.
+        atomic_write_json(path, {"last_sequence": sequence})
+        return sequence
 
     def submit(self, raw: dict) -> dict:
         request_id = uuid.UUID(str(raw.get("request_id", ""))).hex
@@ -81,6 +119,7 @@ class IdentificationJobs:
                 if prior["fingerprint"] != value["fingerprint"]:
                     raise ConflictError("相同请求编号对应不同决定，已拒绝重复提交")
                 return self.public(prior)
+            value["queue_sequence"] = self._reserve_sequence()
             # Receipt is durable before the browser advances, not a claim of completed saving.
             atomic_write_json(self.pending / f"{request_id}.json", value)
         self.wake.set()
@@ -92,7 +131,7 @@ class IdentificationJobs:
             recent = list(self.recent)
         counts = Counter(j["state"] for j in pending + recent)
         return {
-            "pending": [self.public(j) for j in sorted(pending, key=lambda j: j["submitted_at"])],
+            "pending": [self.public(j) for j in sorted(pending, key=_queue_order)],
             "recent": [self.public(j) for j in reversed(recent)],
             "counts": dict(counts),
             "recent_limit": 50,
@@ -204,7 +243,7 @@ class IdentificationJobs:
                 with file_lock(self.root / ".runner.lock"):
                     jobs = [read_json(p) for p in self.pending.glob("*.json")]
                     if jobs:
-                        self._run(min(jobs, key=lambda j: (j["submitted_at"], j["id"])))
+                        self._run(min(jobs, key=_queue_order))
                         self.last_error = ""
                         continue
             except BusyError:
